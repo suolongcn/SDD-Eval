@@ -1,8 +1,979 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SDD Eval</title><style>body{margin:0;background:#f4f6f8;color:#17202a;font:14px system-ui}header{padding:24px 6%;background:#17202a;color:#fff}main{max-width:1200px;margin:auto;padding:20px}.tabs,.toolbar{display:flex;gap:8px;flex-wrap:wrap}.tabs{background:#fff;padding:5px;border-radius:8px;margin-bottom:16px}.tab,.action{border:0;border-radius:6px;padding:9px 14px;cursor:pointer;font-weight:600}.tab{background:#fff;color:#667085}.tab.active{background:#e8efff;color:#1d4ed8}.action{background:#2563eb;color:#fff}.action.secondary{background:#eef2f7;color:#344054}.danger{background:#fff0f0;color:#c43232;border:1px solid #fecaca;border-radius:5px;padding:6px 9px;cursor:pointer}.view{display:none}.view.active{display:block}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card,.panel,.modal-box{background:#fff;border:1px solid #e5e7eb;border-radius:9px;padding:18px;box-shadow:0 2px 8px #17202a0a}.panel{margin-bottom:16px}.label{color:#667085;font-size:12px;text-transform:uppercase}.number{font-size:30px;font-weight:750}input,select{padding:9px;border:1px solid #cbd5e1;border-radius:6px;min-width:180px}table{width:100%;border-collapse:collapse}td,th{padding:10px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}th{font-size:12px;color:#667085;text-transform:uppercase}pre{white-space:pre-wrap;max-height:420px;overflow:auto;background:#101828;color:#e5e7eb;padding:12px;border-radius:6px}.modal{display:none;position:fixed;inset:0;background:#10182899;z-index:10;align-items:center;justify-content:center;padding:20px}.modal.open{display:flex}.modal-box{width:min(1100px,96vw);max-height:92vh;overflow:auto;position:relative}.modal-close{position:absolute;right:16px;top:12px;border:0;border-radius:50%;width:32px;height:32px;font-size:20px;cursor:pointer}@media(max-width:800px){.grid{grid-template-columns:repeat(2,1fr)}table{display:block;overflow:auto;white-space:nowrap}}
-</style><header><h1>SDD Eval</h1><p>Spec-driven development evaluation workspace</p></header><main><nav class="tabs"><button class="tab active" data-view="overview">Overview</button><button class="tab" data-view="cases">Test Cases</button><button class="tab" data-view="runs">Runs</button></nav><section id="overview" class="view active"><div class="grid" id="cards"></div><div class="panel"><h2>Recent runs</h2><table id="recent"></table></div></section><section id="cases" class="view"><div class="panel"><nav class="tabs sub-tabs"><button class="tab active" data-run-view="single-run">Single task</button><button class="tab" data-run-view="batch-run">Batch compare</button></nav><div id="single-run"><h2>Run a test case</h2><div class="toolbar"><input id="taskId" placeholder="Task ID"><select id="client"><option value="codex">Codex CLI</option><option value="opencode">OpenCode CLI</option></select><select id="model"><option value="gpt-5.6-luna">Luna</option><option value="gpt-5.6-terra">Terra</option><option value="gpt-5.6-sol">Sol</option></select><select id="tool"><option value="openspec">OpenSpec</option><option value="superpowers">Superpowers</option></select><button class="action" id="execute">Run task</button><span id="message"></span></div></div><div id="batch-run" style="display:none"><h2>Compare models</h2><div class="toolbar"><input id="batchTaskId" placeholder="Task ID"><select id="batchClient"><option value="codex">Codex CLI</option><option value="opencode">OpenCode CLI</option></select><select id="batchModel" multiple size="6"></select><select id="batchTool"><option value="openspec">OpenSpec</option><option value="superpowers">Superpowers</option></select><button class="action" id="batchExecute">Run and compare</button><span id="batchMessage"></span></div><div id="batchReport"></div></div></div><div class="panel"><h2>Test cases</h2><table id="taskTable"></table></div></section><section id="runs" class="view"><div class="panel"><h2>All runs</h2><table id="runTable"></table></div></section></main><div id="detailModal" class="modal"><div class="modal-box"><button class="modal-close" onclick="closeDetails()">&times;</button><div id="detail"></div></div></div><script>
-const $=s=>document.querySelector(s),esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));let tasks=[],runs=[];const fd=v=>v?new Date(v).toLocaleString():'-',dur=v=>v==null?'-':Math.floor(v/1000)+'s';
-const projectSource=t=>{const provider=String(t.reference_provider||'').toLowerCase(),repo=String(t.repository||'');const match=repo.match(/(?:https?:\/\/)?(?:www\.)?(github|gitee|gitcode)\.com\//i);const id=provider.match(/^(github|gitee|gitcode)$/)?.[1]||match?.[1]?.toLowerCase();const labels={github:'GitHub',gitee:'Gitee',gitcode:'GitCode'};if(!id)return {label:'Unknown',url:repo};return {label:labels[id]||id,url:repo};};
-document.querySelectorAll('.tab[data-view]').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab[data-view]').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#'+b.dataset.view).classList.add('active')});
-async function load(){[tasks,runs]=await Promise.all([fetch('/api/tasks').then(r=>r.json()),fetch('/api/runs').then(r=>r.json())]);runs.sort((a,b)=>new Date(b.started_at||0)-new Date(a.started_at||0));$('#cards').innerHTML=`<div class="card"><div class="label">Test cases</div><div class="number">${tasks.length}</div></div><div class="card"><div class="label">Runs</div><div class="number">${runs.length}</div></div><div class="card"><div class="label">Average score</div><div class="number">${runs.length?(runs.reduce((n,x)=>n+(x.score||0),0)/runs.length).toFixed(1):'-'}</div></div><div class="card"><div class="label">Tokens</div><div class="number">${runs.reduce((n,x)=>n+(x.token_usage?.input_tokens||0)+(x.token_usage?.output_tokens||0),0)}</div></div>`;$('#recent').innerHTML='<tr><th>Run</th><th>Task</th><th>Started</th><th>Duration</th><th>Score</th><th></th></tr>'+runs.slice(0,8).map(x=>`<tr><td>${esc(x.run_id)}</td><td>${esc(x.task_id)}</td><td>${fd(x.started_at)}</td><td>${dur(x.duration_ms)}</td><td>${x.score??'-'}</td><td><button class="action secondary" onclick="showRun('${esc(x.run_id)}')">Details</button></td></tr>`).join('');$('#taskTable').innerHTML='<tr><th>ID</th><th>Title</th><th>Created</th><th>Project source</th><th>Code size</th><th>Reference Issue</th><th>Actions</th></tr>'+tasks.map(t=>{const source=projectSource(t),issue=t.source_issue_url,lines=t.reference_code_lines??t.reference_changed_lines,size=lines==null?'<span title="Code size unavailable">Not collected</span>':esc(`${lines} ${t.reference_code_estimated?'estimated lines':'changed lines'}`);return `<tr><td>${esc(t.id)}</td><td>${esc(t.title)}</td><td>${fd(t.created_at)}</td><td><span class="source source-${source.label.toLowerCase()}">${esc(source.label)}</span>${source.url?`<a class="repo-link" href="${esc(source.url)}" target="_blank" rel="noopener">${esc(t.repository||'Repository')}</a>`:''}</td><td>${size}</td><td>${issue?`<a href="${esc(issue)}" target="_blank" rel="noopener">Issue #${esc(t.source_issue_number??'')}</a>`:'<span title="No linked issue for this task">No issue linked</span>'}</td><td><button class="action secondary" onclick="selectTask('${esc(t.id)}')">Run</button> <button class="danger" type="button" aria-label="Delete ${esc(t.id)}" onclick="deleteTask('${esc(t.id)}')">Delete</button></td></tr>`}).join('');$('#runTable').innerHTML='<tr><th>Run</th><th>Task</th><th>Status</th><th>Started</th><th>Duration</th><th>Score</th><th></th></tr>'+runs.map(x=>`<tr><td>${esc(x.run_id)}</td><td>${esc(x.task_id)}</td><td>${esc(x.status)}</td><td>${fd(x.started_at)}</td><td>${dur(x.duration_ms)}</td><td>${x.score??'-'}</td><td><button class="action secondary" onclick="showRun('${esc(x.run_id)}')">Details</button></td></tr>`).join('')}
-function selectTask(id){$('#taskId').value=id;document.querySelector('[data-view=cases]').click()}async function deleteTask(id){if(!window.confirm('Delete test case '+id+'? Its saved runs will also be removed.'))return;const response=await fetch('/api/tasks/'+encodeURIComponent(id),{method:'DELETE'});let data={};try{data=await response.json()}catch(e){}if(!response.ok){$('#message').textContent=data.detail||'Delete failed';return}if($('#taskId').value.trim()===id)$('#taskId').value='';$('#message').textContent='Deleted '+id;await load()}function closeDetails(){$('#detailModal').classList.remove('open')}$('#detailModal').onclick=e=>{if(e.target.id==='detailModal')closeDetails()};document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDetails()});async function showRun(id){let x=await fetch('/api/runs/'+encodeURIComponent(id)).then(r=>r.json()),a=x.artifacts||{},docs=a.documents||{},v=x.validation||{},ref=a.reference||{},referenceHtml=ref.url?`<p>Reference: <a href="${esc(ref.url)}" target="_blank" rel="noopener">${esc(ref.url)}</a> | Code size: ${ref.code_lines==null?'-':esc(ref.code_lines+' '+(ref.code_lines_estimated?'estimated lines':'changed lines'))}</p>`:'';$('#detail').innerHTML=`<h2>Run ${esc(x.run_id)}</h2><p>Status: ${esc(x.status)} | Score: ${x.score??'-'} | Started: ${fd(x.started_at)} | Finished: ${fd(x.finished_at)} | Duration: ${dur(x.duration_ms)}</p>${referenceHtml}<p>Model: ${esc(x.token_usage.provider)} | Input tokens: ${x.token_usage.input_tokens} | Output tokens: ${x.token_usage.output_tokens} | Build: ${v.build_passed} | Tests: ${v.tests_passed}</p><h3>Execution steps (${(x.steps||[]).length})</h3><table>${(x.steps||[]).map(s=>`<tr><td>${esc(s.name)}</td><td>${esc(s.status)}</td><td>${s.duration_ms} ms</td><td>${esc(s.detail)}</td></tr>`).join('')}</table>${a.execution_log?`<h3>Console execution log</h3><pre class="console-log">${esc(a.execution_log)}</pre>`:'<h3>Console execution log</h3><p>No console log captured.</p>'}<h3>Scoring evidence</h3><table>${(x.scoring_basis||[]).map(s=>`<tr><td>${esc(s.dimension)}</td><td>${s.weight}%</td><td>${s.score??'-'}</td><td>${esc(s.basis)}</td></tr>`).join('')}</table><h3>Generated documents</h3>${Object.entries(docs).map(([n,c])=>`<h4>${esc(n)}</h4><pre>${esc(c)}</pre>`).join('')||'<p>No documents.</p>'}<h3>Generated code</h3><pre>${esc(a.generated_code||'No generated code.')}</pre>`;$('#detailModal').classList.add('open')}
-$('#batchExecute').onclick=async()=>{let id=$('#batchTaskId').value.trim(),models=[...$('#batchModel').selectedOptions].map(o=>o.value);if(!id||!models.length)return;let r=await fetch('/api/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id:id,client:$('#batchClient').value,model:models[0],models,tool:$('#batchTool').value})});$('#batchMessage').textContent=r.ok?'Completed':'Failed';await load()};async function loadCapabilities(){try{let c=await fetch('/api/capabilities').then(r=>r.json()),tools=c.tools||[],sel=$('#tool');if(sel&&tools.length){sel.innerHTML='';tools.forEach(t=>{let o=document.createElement('option');o.value=t.id;o.textContent=t.id+(t.available?'':' (unavailable)');o.disabled=!t.available;sel.appendChild(o)})}}catch(e){}}const modelSelect=$('#model'),clientSelect=$('#client');clientSelect.setAttribute('aria-label','Client');modelSelect.setAttribute('aria-label','Model');$('#execute').onclick=async()=>{let id=$('#taskId').value.trim(),client=clientSelect.value,model=modelSelect.value,tool=$('#tool').value;if(!id)return;$('#message').innerHTML='<a href="#runs">闁哄被鍎冲﹢鍛村箥瑜戦、鎴犳媼閺夎法绉块柨娑樼墛婢х晫鎮扮仦鑹板幀�?/a>';let r=await fetch('/api/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id:id,client,model,tool})}),d=await r.json();$('#message').innerHTML=r.ok&&d.run_id?'<a href="#runs" onclick="showRun(' + d.run_id + ')">闁哄被鍎冲﹢鍛村箥瑜戦、鎴犵磼閹惧浜?' + esc(d.run_id) + '</a>':(d.detail||'Failed');await load();if(r.ok&&d.run_id)showRun(d.run_id)};const compareButton=$("#compare");if(compareButton)compareButton.onclick=async()=>{let ids=window.prompt('Enter run IDs separated by commas');if(!ids)return;let r=await fetch('/api/runs/compare',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ids.split(',').map(x=>x.trim()).filter(Boolean))}),d=await r.json();showComparison(d)};function showComparison(rows){$("#detail").innerHTML='<h2>Run comparison</h2><table><tr><th>Run</th><th>Model</th><th>Score</th><th>Document</th><th>Code</th><th>Tests</th><th>Reference</th><th>Efficiency</th></tr>'+rows.map(x=>'<tr>'+['run_id','model','score','document','code','tests','reference','efficiency'].map(k=>'<td>'+esc(x[k])+'</td>').join('')+'</tr>').join('')+'</table>';$("#detailModal").classList.add('open')}document.querySelectorAll('[data-run-view]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-run-view]').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('#single-run,#batch-run').forEach(x=>x.style.display=x.id===b.dataset.runView?'block':'none')});loadCapabilities();load();</script></html>
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  /><title>SDD Eval</title
+  ><style>
+    body {
+      margin: 0;
+      background: #f4f6f8;
+      color: #17202a;
+      font: 14px system-ui;
+    }
+    header {
+      padding: 24px 6%;
+      background: #17202a;
+      color: #fff;
+    }
+    main {
+      max-width: 1200px;
+      margin: auto;
+      padding: 20px;
+    }
+    .tabs,
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .tabs {
+      background: #fff;
+      padding: 5px;
+      border-radius: 8px;
+      margin-bottom: 16px;
+    }
+    .tab,
+    .action {
+      border: 0;
+      border-radius: 6px;
+      padding: 9px 14px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .tab {
+      background: #fff;
+      color: #667085;
+    }
+    .tab.active {
+      background: #e8efff;
+      color: #1d4ed8;
+    }
+    .action {
+      background: #2563eb;
+      color: #fff;
+    }
+    .action.secondary {
+      background: #eef2f7;
+      color: #344054;
+    }
+    .danger {
+      background: #fff0f0;
+      color: #c43232;
+      border: 1px solid #fecaca;
+      border-radius: 5px;
+      padding: 6px 9px;
+      cursor: pointer;
+    }
+    .view {
+      display: none;
+    }
+    .view.active {
+      display: block;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+    .card,
+    .panel,
+    .modal-box {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 9px;
+      padding: 18px;
+      box-shadow: 0 2px 8px #17202a0a;
+    }
+    .panel {
+      margin-bottom: 16px;
+    }
+    .label {
+      color: #667085;
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+    .number {
+      font-size: 30px;
+      font-weight: 750;
+    }
+    input,
+    select {
+      padding: 9px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      min-width: 180px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    td,
+    th {
+      padding: 10px;
+      border-bottom: 1px solid #e5e7eb;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      font-size: 12px;
+      color: #667085;
+      text-transform: uppercase;
+    }
+    pre {
+      white-space: pre-wrap;
+      max-height: 420px;
+      overflow: auto;
+      background: #101828;
+      color: #e5e7eb;
+      padding: 12px;
+      border-radius: 6px;
+    }
+    .modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: #10182899;
+      z-index: 10;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .modal.open {
+      display: flex;
+    }
+    .modal-box {
+      width: min(1100px, 96vw);
+      max-height: 92vh;
+      overflow: auto;
+      position: relative;
+    }
+    .modal-close {
+      position: absolute;
+      right: 16px;
+      top: 12px;
+      border: 0;
+      border-radius: 50%;
+      width: 32px;
+      height: 32px;
+      font-size: 20px;
+      cursor: pointer;
+    }
+    @media (max-width: 800px) {
+      .grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      table {
+        display: block;
+        overflow: auto;
+        white-space: nowrap;
+      }
+    }
+    /* Refined dashboard theme */
+    :root {
+      --navy: #10233f;
+      --blue: #356ae6;
+      --ink: #17243b;
+      --muted: #68758a;
+      --line: #e5eaf2;
+      --surface: #fff;
+      --page: #f4f7fb;
+      --shadow: 0 12px 32px rgba(24, 45, 82, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      background: radial-gradient(circle at 85% 0, #e6f2ff 0, transparent 28%), var(--page);
+      color: var(--ink);
+      font: 14px/1.55 Inter, "Segoe UI", system-ui, sans-serif;
+    }
+    header {
+      position: relative;
+      overflow: hidden;
+      padding: 34px max(6%, calc((100% - 1240px) / 2));
+      background: linear-gradient(120deg, #10233f, #173c70 68%, #176b83);
+      box-shadow: 0 8px 28px rgba(16, 35, 63, 0.2);
+    }
+    header::after {
+      content: "";
+      position: absolute;
+      width: 320px;
+      height: 320px;
+      right: 7%;
+      top: -210px;
+      border: 55px solid rgba(255, 255, 255, 0.07);
+      border-radius: 50%;
+    }
+    header h1 { position: relative; margin: 0; font-size: 28px; letter-spacing: -0.5px; }
+    header p { position: relative; margin: 4px 0 0; color: #c9d7ec; }
+    main { max-width: 1280px; padding: 26px 20px 48px; }
+    main > .tabs { position: sticky; top: 12px; z-index: 5; }
+    .tabs {
+      padding: 7px;
+      margin-bottom: 22px;
+      border: 1px solid rgba(222, 229, 240, 0.9);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.94);
+      box-shadow: 0 8px 24px rgba(33, 55, 92, 0.08);
+      backdrop-filter: blur(12px);
+    }
+    .tab, .action { border-radius: 8px; padding: 10px 16px; transition: 0.18s ease; }
+    .tab { background: transparent; color: var(--muted); }
+    .tab:hover { background: #f2f5f9; color: var(--ink); }
+    .tab.active {
+      color: #fff;
+      background: linear-gradient(135deg, var(--blue), #4c82f1);
+      box-shadow: 0 5px 14px rgba(53, 106, 230, 0.28);
+    }
+    .action {
+      background: linear-gradient(135deg, var(--blue), #477cef);
+      box-shadow: 0 4px 11px rgba(53, 106, 230, 0.22);
+    }
+    .action:hover { transform: translateY(-1px); box-shadow: 0 7px 16px rgba(53, 106, 230, 0.3); }
+    .action.secondary { background: #edf3ff; color: #295bc8; box-shadow: none; }
+    .danger { border-radius: 7px; padding: 7px 10px; font-weight: 600; }
+    .view.active { animation: fade-up 0.22s ease; }
+    @keyframes fade-up { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+    .grid { gap: 16px; margin-bottom: 20px; }
+    .card, .panel, .modal-box {
+      border-color: var(--line);
+      border-radius: 14px;
+      padding: 22px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: var(--shadow);
+    }
+    .card { position: relative; overflow: hidden; min-height: 116px; }
+    .card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--blue); }
+    .card:nth-child(2)::before { background: #20b8cd; }
+    .card:nth-child(3)::before { background: #8b65dc; }
+    .card:nth-child(4)::before { background: #ef9c43; }
+    .panel { margin-bottom: 20px; overflow: auto; }
+    .panel h2 { margin: 0 0 18px; font-size: 18px; letter-spacing: -0.2px; }
+    .label { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.08em; }
+    .number { margin-top: 7px; color: var(--navy); font-size: 34px; line-height: 1; }
+    .toolbar { align-items: center; padding: 14px; background: #f8fafd; border: 1px solid #e9eef5; border-radius: 11px; }
+    input, select {
+      min-width: 190px;
+      max-width: 100%;
+      padding: 10px 12px;
+      border-color: #d6deea;
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      outline: none;
+      transition: 0.18s ease;
+    }
+    #taskIds { min-width: min(520px, 100%); }
+    input:focus, select:focus { border-color: #7aa2f5; box-shadow: 0 0 0 3px rgba(53, 106, 230, 0.12); }
+    table { border-collapse: separate; border-spacing: 0; }
+    td, th { padding: 12px 13px; border-bottom-color: #edf0f5; vertical-align: middle; }
+    th { background: #f8fafd; color: #738096; font-size: 11px; font-weight: 700; letter-spacing: 0.045em; }
+    th:first-child { border-radius: 8px 0 0 8px; }
+    th:last-child { border-radius: 0 8px 8px 0; }
+    table tr:not(:first-child):hover { background: #f8fbff; }
+    td a { color: #2e65d5; text-decoration: none; font-weight: 600; }
+    td a:hover { text-decoration: underline; }
+    .source { display: inline-block; margin-right: 7px; padding: 3px 7px; border-radius: 5px; background: #edf3ff; color: var(--blue); font-size: 11px; font-weight: 700; }
+    .repo-link { display: inline-block; max-width: 210px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; white-space: nowrap; }
+    pre { padding: 16px; border: 1px solid #24334c; border-radius: 9px; background: #101a2b; color: #dce6f4; }
+    .modal { background: rgba(10, 23, 43, 0.66); backdrop-filter: blur(5px); }
+    .modal-box { padding: 28px; }
+    .modal-close { border: 1px solid var(--line); background: #fff; color: #526077; box-shadow: 0 3px 10px rgba(20, 37, 65, 0.12); }
+    @media (max-width: 800px) {
+      header { padding: 25px 22px; }
+      main { padding: 18px 12px; }
+      main > .tabs { top: 6px; overflow-x: auto; flex-wrap: nowrap; }
+      .tab { white-space: nowrap; }
+      .panel { padding: 16px; }
+      .toolbar { align-items: stretch; flex-direction: column; }
+      .toolbar > * { width: 100%; min-width: 0 !important; }
+    }
+    @media (max-width: 480px) { .grid { grid-template-columns: 1fr; } .card { min-height: 96px; } }
+  </style>
+  <header>
+    <h1>SDD Eval</h1>
+    <p>Spec-driven development evaluation workspace</p>
+  </header>
+  <main>
+    <nav class="tabs">
+      <button class="tab active" data-view="overview">Overview</button>
+      <button class="tab" data-view="cases">Test Cases</button>
+      <button class="tab" data-view="single-task">Single Task</button>
+      <button class="tab" data-view="model-compare">Model Compare</button>
+      <button class="tab" data-view="runs">Runs History</button>
+    </nav>
+    <section id="overview" class="view active">
+      <div class="grid" id="cards"></div>
+      <div class="panel">
+        <h2>Recent runs</h2>
+        <table id="recent"></table>
+      </div>
+    </section>
+    <section id="cases" class="view">
+      <div class="panel">
+        <h2>Test cases</h2>
+        <table id="taskTable"></table>
+      </div>
+      <div class="panel" id="batch-run">
+        <h2>Batch compare</h2>
+        <div class="toolbar">
+          <input id="batchTaskId" placeholder="Task ID" /><select
+            id="batchClient"
+          >
+            <option value="codex">Codex CLI</option>
+            <option value="opencode">OpenCode CLI</option></select
+          ><select id="batchModel" multiple size="6"></select
+          ><select id="batchTool">
+            <option value="openspec">OpenSpec</option>
+            <option value="superpowers">Superpowers</option></select
+          ><button class="action" id="batchExecute">Run and compare</button
+          ><span id="batchMessage"></span>
+        </div>
+        <div id="batchReport"></div>
+      </div>
+    </section>
+    <section id="single-task" class="view">
+      <div class="panel" id="single-run">
+        <h2>Run a test case</h2>
+        <div class="toolbar">
+          <select
+            id="taskIds"
+            multiple
+            size="4"
+            aria-label="Test cases"
+          ></select
+          ><input id="taskId" placeholder="Task ID" /><select id="client">
+            <option value="codex">Codex CLI</option>
+            <option value="opencode">OpenCode CLI</option></select
+          ><select id="model">
+            <option value="gpt-5.6-luna">Luna</option>
+            <option value="gpt-5.6-terra">Terra</option>
+            <option value="gpt-5.6-sol">Sol</option></select
+          ><select id="tool">
+            <option value="openspec">OpenSpec</option>
+            <option value="superpowers">Superpowers</option></select
+          ><button class="action" id="execute">Run task</button
+          ><span id="message"></span>
+        </div>
+      </div>
+    </section>
+    <section id="model-compare" class="view">
+      <div class="panel">
+        <h2>Model Compare</h2>
+        <div class="toolbar">
+          <select
+            id="compareTasks"
+            multiple
+            size="6"
+            aria-label="Test cases"
+          ></select
+          ><select
+            id="compareModels"
+            multiple
+            size="6"
+            aria-label="Models"
+          ></select
+          ><select id="compareClient">
+            <option value="codex">Codex CLI</option>
+            <option value="opencode">OpenCode CLI</option></select
+          ><select id="compareTool">
+            <option value="openspec">OpenSpec</option>
+            <option value="superpowers">Superpowers</option></select
+          ><button class="action" id="runModelCompare">Run comparison</button
+          ><span id="compareMessage"></span>
+        </div>
+        <div id="modelCompareReport"></div>
+        <h2>Comparison history</h2>
+        <table id="comparisonHistory"></table>
+      </div>
+    </section>
+    <section id="runs" class="view">
+      <div class="panel">
+        <h2>All runs</h2>
+        <table id="runTable"></table>
+      </div>
+    </section>
+  </main>
+  <div id="detailModal" class="modal">
+    <div class="modal-box">
+      <button class="modal-close" onclick="closeDetails()">&times;</button>
+      <div id="detail"></div>
+    </div>
+  </div>
+  <script>
+    const $ = (s) => document.querySelector(s),
+      esc = (v) =>
+        String(v ?? "").replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+    let tasks = [],
+      runs = [];
+    const fd = (v) => (v ? new Date(v).toLocaleString() : "-"),
+      dur = (v) => (v == null ? "-" : Math.floor(v / 1000) + "s");
+    const projectSource = (t) => {
+      const provider = String(t.reference_provider || "").toLowerCase(),
+        repo = String(t.repository || "");
+      const match = repo.match(
+        /(?:https?:\/\/)?(?:www\.)?(github|gitee|gitcode)\.com\//i,
+      );
+      const id =
+        provider.match(/^(github|gitee|gitcode)$/)?.[1] ||
+        match?.[1]?.toLowerCase();
+      const labels = { github: "GitHub", gitee: "Gitee", gitcode: "GitCode" };
+      if (!id) return { label: "Unknown", url: repo };
+      return { label: labels[id] || id, url: repo };
+    };
+    const taskOptionLabel = (t) => {
+      let project =
+        String(t.repository || "Unknown project")
+          .replace(/\/$/, "")
+          .split("/")
+          .pop() || "Unknown project";
+      return `${t.id} | ${t.title || "Untitled test case"} | ${project}`;
+    };
+    const singleTaskSelect = $("#taskIds"),
+      generatedTaskId = $("#taskId");
+    singleTaskSelect.removeAttribute("multiple");
+    singleTaskSelect.removeAttribute("size");
+    singleTaskSelect.setAttribute("aria-label", "Test case");
+    generatedTaskId.type = "hidden";
+    singleTaskSelect.addEventListener(
+      "change",
+      () => (generatedTaskId.value = singleTaskSelect.value),
+    );
+    singleTaskSelect.addEventListener(
+      "mousedown",
+      (e) => e.stopImmediatePropagation(),
+      true,
+    );
+    new MutationObserver(() => {
+      [...singleTaskSelect.options].forEach((o) => {
+        let task = tasks.find((t) => t.id === o.value);
+        if (task) {
+          o.textContent = taskOptionLabel(task);
+          o.title = `Purpose: ${task.title || "-"} | Project: ${task.repository || "-"}`;
+        }
+      });
+      generatedTaskId.value = singleTaskSelect.value;
+    }).observe(singleTaskSelect, { childList: true });
+    document.querySelectorAll(".tab[data-view]").forEach(
+      (b) =>
+        (b.onclick = () => {
+          document
+            .querySelectorAll(".tab[data-view]")
+            .forEach((x) => x.classList.remove("active"));
+          document
+            .querySelectorAll(".view")
+            .forEach((x) => x.classList.remove("active"));
+          b.classList.add("active");
+          $("#" + b.dataset.view).classList.add("active");
+        }),
+    );
+    async function load() {
+      [tasks, runs] = await Promise.all([
+        fetch("/api/tasks").then((r) => r.json()),
+        fetch("/api/runs").then((r) => r.json()),
+      ]);
+      let taskSelect = document.querySelector("#taskIds");
+      let compareTasks = document.querySelector("#compareTasks");
+      if (compareTasks && !compareTasks.options.length)
+        tasks.forEach((t) => {
+          let o = document.createElement("option");
+          o.value = t.id;
+          o.textContent = t.id;
+          compareTasks.appendChild(o);
+        });
+      if (taskSelect && !taskSelect.options.length)
+        tasks.forEach((t) => {
+          let o = document.createElement("option");
+          o.value = t.id;
+          o.textContent = t.id;
+          taskSelect.appendChild(o);
+        });
+      runs.sort(
+        (a, b) => new Date(b.started_at || 0) - new Date(a.started_at || 0),
+      );
+      $("#cards").innerHTML =
+        `<div class="card"><div class="label">Test cases</div><div class="number">${tasks.length}</div></div><div class="card"><div class="label">Runs</div><div class="number">${runs.length}</div></div><div class="card"><div class="label">Average score</div><div class="number">${runs.length ? (runs.reduce((n, x) => n + (x.score || 0), 0) / runs.length).toFixed(1) : "-"}</div></div><div class="card"><div class="label">Tokens</div><div class="number">${runs.reduce((n, x) => n + (x.token_usage?.input_tokens || 0) + (x.token_usage?.output_tokens || 0), 0)}</div></div>`;
+      $("#recent").innerHTML =
+        "<tr><th>Run</th><th>Task</th><th>Started</th><th>Duration</th><th>Score</th><th></th></tr>" +
+        runs
+          .slice(0, 8)
+          .map(
+            (x) =>
+              `<tr><td>${esc(x.run_id)}</td><td>${esc(x.task_id)}</td><td>${fd(x.started_at)}</td><td>${dur(x.duration_ms)}</td><td>${x.score ?? "-"}</td><td><button class="action secondary" onclick="showRun('${esc(x.run_id)}')">Details</button></td></tr>`,
+          )
+          .join("");
+      $("#taskTable").innerHTML =
+        "<tr><th>Select</th><th>ID</th><th>Title</th><th>Created</th><th>Project source</th><th>Code size</th><th>Reference Issue</th><th>Actions</th></tr>" +
+        tasks
+          .map((t) => {
+            const source = projectSource(t),
+              issue = t.source_issue_url,
+              lines = t.reference_code_lines ?? t.reference_changed_lines,
+              size =
+                lines == null
+                  ? '<span title="Code size unavailable">Not collected</span>'
+                  : esc(
+                      `${lines} ${t.reference_code_estimated ? "estimated lines" : "changed lines"}`,
+                    );
+            return `<tr><td><input type="checkbox" class="task-check" value="${esc(t.id)}" onchange="syncTaskSelection()"></td><td>${esc(t.id)}</td><td>${esc(t.title)}</td><td>${fd(t.created_at)}</td><td><span class="source source-${source.label.toLowerCase()}">${esc(source.label)}</span>${source.url ? `<a class="repo-link" href="${esc(source.url)}" target="_blank" rel="noopener">${esc(t.repository || "Repository")}</a>` : ""}</td><td>${size}</td><td>${issue ? `<a href="${esc(issue)}" target="_blank" rel="noopener">Issue #${esc(t.source_issue_number ?? "")}</a>` : '<span title="No linked issue for this task">No issue linked</span>'}</td><td><button class="action secondary" onclick="selectTask('${esc(t.id)}')">Run</button> <button class="danger" type="button" aria-label="Delete ${esc(t.id)}" onclick="deleteTask('${esc(t.id)}')">Delete</button></td></tr>`;
+          })
+          .join("");
+      $("#runTable").innerHTML =
+        "<tr><th>Run</th><th>Task</th><th>Status</th><th>Started</th><th>Duration</th><th>Score</th><th></th></tr>" +
+        runs
+          .map(
+            (x) =>
+              `<tr><td>${esc(x.run_id)}</td><td>${esc(x.task_id)}</td><td>${esc(x.status)}</td><td>${fd(x.started_at)}</td><td>${dur(x.duration_ms)}</td><td>${x.score ?? "-"}</td><td><button class="action secondary" onclick="showRun('${esc(x.run_id)}')">Details</button></td></tr>`,
+          )
+          .join("");
+    }
+    function syncTaskSelection() {
+      let ids = [...document.querySelectorAll(".task-check:checked")].map(
+          (x) => x.value,
+        ),
+        sel = document.querySelector("#taskIds");
+      if (sel) {
+        [...sel.options].forEach((o) => (o.selected = ids.includes(o.value)));
+      }
+      document.querySelector("#taskId").value = ids[0] || "";
+    }
+    function selectTask(id) {
+      let box = document.querySelector(
+        '.task-check[value="' + CSS.escape(id) + '"]',
+      );
+      if (box) box.checked = true;
+      syncTaskSelection();
+      document.querySelector("[data-view=single-task]").click();
+    }
+    async function deleteTask(id) {
+      if (
+        !window.confirm(
+          "Delete test case " + id + "? Its saved runs will also be removed.",
+        )
+      )
+        return;
+      const response = await fetch("/api/tasks/" + encodeURIComponent(id), {
+        method: "DELETE",
+      });
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (e) {}
+      if (!response.ok) {
+        $("#message").textContent = data.detail || "Delete failed";
+        return;
+      }
+      if ($("#taskId").value.trim() === id) $("#taskId").value = "";
+      $("#message").textContent = "Deleted " + id;
+      await load();
+    }
+    function closeDetails() {
+      $("#detailModal").classList.remove("open");
+    }
+    $("#detailModal").onclick = (e) => {
+      if (e.target.id === "detailModal") closeDetails();
+    };
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeDetails();
+    });
+    async function showRun(id) {
+      let x = await fetch("/api/runs/" + encodeURIComponent(id)).then((r) =>
+          r.json(),
+        ),
+        a = x.artifacts || {},
+        docs = a.documents || {},
+        v = x.validation || {},
+        ref = a.reference || {},
+        referenceHtml = ref.url
+          ? `<p>Reference: <a href="${esc(ref.url)}" target="_blank" rel="noopener">${esc(ref.url)}</a> | Code size: ${ref.code_lines == null ? "-" : esc(ref.code_lines + " " + (ref.code_lines_estimated ? "estimated lines" : "changed lines"))}</p>`
+          : "";
+      $("#detail").innerHTML =
+        `<h2>Run ${esc(x.run_id)}</h2><p data-run-status>Status: ${esc(x.status)} | Score: ${x.score ?? "-"} | Started: ${fd(x.started_at)} | Finished: ${fd(x.finished_at)} | Duration: ${dur(x.duration_ms)}</p>${referenceHtml}<p>Model: ${esc(x.token_usage.provider)} | Input tokens: ${x.token_usage.input_tokens} | Output tokens: ${x.token_usage.output_tokens} | Build: ${v.build_passed} | Tests: ${v.tests_passed}</p><h3>Execution steps (${(x.steps || []).length})</h3><table data-run-progress>${(x.steps || []).map((s) => `<tr><td>${esc(s.name)}</td><td>${esc(s.status)}</td><td>${s.duration_ms} ms</td><td>${esc(s.detail)}</td></tr>`).join("")}</table>${a.execution_log ? `<h3>Console execution log</h3><pre class="console-log">${esc(a.execution_log)}</pre>` : "<h3>Console execution log</h3><p>No console log captured.</p>"}<h3>Scoring evidence</h3><table>${(x.scoring_basis || []).map((s) => `<tr><td>${esc(s.dimension)}</td><td>${s.weight}%</td><td>${s.score ?? "-"}</td><td>${esc(s.basis)}</td></tr>`).join("")}</table><h3>Generated documents</h3>${
+          Object.entries(docs)
+            .map(([n, c]) => `<h4>${esc(n)}</h4><pre>${esc(c)}</pre>`)
+            .join("") || "<p>No documents.</p>"
+        }<h3>Generated code</h3><pre>${esc(a.generated_code || "No generated code.")}</pre>`;
+      $("#detailModal").classList.add("open");
+    }
+    $("#batchExecute").onclick = async () => {
+      let id = $("#batchTaskId").value.trim(),
+        models = [...$("#batchModel").selectedOptions].map((o) => o.value);
+      if (!id || !models.length) return;
+      let r = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          task_id: id,
+          client: $("#batchClient").value,
+          model: models[0],
+          models,
+          tool: $("#batchTool").value,
+        }),
+      });
+      $("#batchMessage").textContent = r.ok ? "Completed" : "Failed";
+      await load();
+    };
+    document.querySelectorAll(".tab[data-view]").forEach(
+      (b) =>
+        (b.onclick = () => {
+          document
+            .querySelectorAll(".tab[data-view]")
+            .forEach((x) => x.classList.remove("active"));
+          document
+            .querySelectorAll(".view")
+            .forEach((x) => x.classList.remove("active"));
+          b.classList.add("active");
+          document.querySelector("#" + b.dataset.view).classList.add("active");
+        }),
+    );
+    let selectedComparisonId = null;
+    const comparisonDimensions = [
+      "Document quality",
+      "Code quality",
+      "Test quality",
+      "Reference comparison",
+      "Efficiency",
+    ];
+    function comparisonValue(run, name) {
+      let item = (run.scoring_basis || []).find((x) => x.dimension === name);
+      return (
+        item?.score ??
+        run.metrics?.[name.toLowerCase().replaceAll(" ", "_")] ??
+        0
+      );
+    }
+    function renderComparisonReport(comparison) {
+      selectedComparisonId = comparison.comparison_id;
+      let rows = comparison.runs || [];
+      let byTask = comparison.task_ids
+        .map(
+          (taskId) =>
+            "<h3>Task: " +
+            esc(taskId) +
+            "</h3><table><tr><th>Model</th><th>Run</th>" +
+            comparisonDimensions.map((name) => "<th>" + name + "</th>").join("") +
+            "<th>Total</th><th>Status</th></tr>" +
+            rows
+              .filter((run) => run.task_id === taskId)
+              .map(
+                (run) =>
+                  "<tr><td>" +
+                  esc(run.model) +
+                  "</td><td>" +
+                  esc(run.run_id) +
+                  "</td>" +
+                  comparisonDimensions
+                    .map((name) => "<td>" + esc(comparisonValue(run, name)) + "</td>")
+                    .join("") +
+                  "<td>" +
+                  esc(run.score ?? "-") +
+                  "</td><td>" +
+                  esc(run.status) +
+                  "</td></tr>",
+              )
+              .join("") +
+            "</table>",
+        )
+        .join("");
+      $("#modelCompareReport").innerHTML =
+        "<h2>Comparison " +
+        esc(comparison.comparison_id) +
+        "</h2><p>Started: " +
+        fd(comparison.started_at) +
+        " | Status: " +
+        esc(comparison.status) +
+        " | Progress: " +
+        comparison.completed_runs +
+        "/" +
+        comparison.total_runs +
+        " | Average score: " +
+        esc(comparison.score ?? "-") +
+        "</p>" +
+        byTask;
+    }
+    async function showComparisonHistory(id) {
+      let comparison = await fetch(
+        "/api/comparisons/" + encodeURIComponent(id),
+      ).then((response) => response.json());
+      renderComparisonReport(comparison);
+    }
+    async function loadComparisons() {
+      try {
+        let comparisons = await fetch("/api/comparisons").then((response) =>
+          response.json(),
+        );
+        $("#comparisonHistory").innerHTML =
+          "<tr><th>Started</th><th>Tasks</th><th>Models</th><th>Status</th><th>Progress</th><th>Score</th><th></th></tr>" +
+          comparisons
+            .map(
+              (item) =>
+                "<tr><td>" +
+                fd(item.started_at) +
+                "</td><td>" +
+                esc(item.task_ids.join(", ")) +
+                "</td><td>" +
+                esc(item.models.join(", ")) +
+                "</td><td>" +
+                esc(item.status) +
+                "</td><td>" +
+                item.completed_runs +
+                "/" +
+                item.total_runs +
+                "</td><td>" +
+                esc(item.score ?? "-") +
+                '</td><td><button class="action secondary comparison-report-button" data-comparison-id="' +
+                esc(item.comparison_id) +
+                '">View report</button></td></tr>',
+            )
+            .join("");
+        document
+          .querySelectorAll(".comparison-report-button")
+          .forEach(
+            (button) =>
+              (button.onclick = () =>
+                showComparisonHistory(button.dataset.comparisonId)),
+          );
+        if (selectedComparisonId) {
+          let selected = comparisons.find(
+            (item) => item.comparison_id === selectedComparisonId,
+          );
+          if (selected) renderComparisonReport(selected);
+        }
+      } catch (error) {}
+    }
+    $("#runModelCompare").onclick = async () => {
+      let taskIds = [...$("#compareTasks").selectedOptions].map((o) => o.value),
+        models = [...$("#compareModels").selectedOptions].map((o) => o.value);
+      if (!taskIds.length || !models.length) {
+        $("#compareMessage").textContent = "Select tests and models";
+        return;
+      }
+      $("#compareMessage").textContent = "Starting comparison...";
+      let response = await fetch("/api/comparisons", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            task_ids: taskIds,
+            models,
+            client: $("#compareClient").value,
+            tool: $("#compareTool").value,
+          }),
+        }),
+        comparison = await response.json();
+      if (!response.ok) {
+        $("#compareMessage").textContent = comparison.detail || "Failed";
+        return;
+      }
+      $("#compareMessage").textContent = "Comparison started";
+      renderComparisonReport(comparison);
+      await loadComparisons();
+    };
+    async function loadCapabilities() {
+      try {
+        let c = await fetch("/api/capabilities").then((r) => r.json()),
+          tools = c.tools || [],
+          sel = $("#tool");
+        let compareModels = document.querySelector("#compareModels");
+        if (compareModels && c.models)
+          c.models.forEach((m) => {
+            let o = document.createElement("option");
+            o.value = m;
+            o.textContent = m;
+            compareModels.appendChild(o);
+          });
+        if (sel && tools.length) {
+          sel.innerHTML = "";
+          tools.forEach((t) => {
+            let o = document.createElement("option");
+            o.value = t.id;
+            o.textContent = t.id + (t.available ? "" : " (unavailable)");
+            o.disabled = !t.available;
+            sel.appendChild(o);
+          });
+        }
+      } catch (e) {}
+    }
+    const modelSelect = $("#model"),
+      clientSelect = $("#client");
+    clientSelect.setAttribute("aria-label", "Client");
+    modelSelect.setAttribute("aria-label", "Model");
+    $("#execute").onclick = async () => {
+      let ids = [...document.querySelectorAll(".task-check:checked")].map(
+          (x) => x.value,
+        ),
+        id = $("#taskId").value.trim() || ids[0],
+        client = clientSelect.value,
+        model = modelSelect.value,
+        tool = $("#tool").value;
+      if (!id) return;
+      let r = await fetch("/api/runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            task_id: id,
+            task_ids: ids.length ? ids : [id],
+            client,
+            model,
+            tool,
+          }),
+        }),
+        d = await r.json();
+      let runList = d.runs || (d.run_id ? [d] : []);
+      if (r.ok && runList.length) {
+        $("#message").innerHTML = runList
+          .map(
+            (x) =>
+              '<a href="#runs" class="run-result-link" data-run-id="' +
+              esc(x.run_id) +
+              '">View run ' +
+              esc(x.run_id) +
+              "</a>",
+          )
+          .join(" | ");
+        document.querySelectorAll(".run-result-link").forEach(
+          (a) =>
+            (a.onclick = (e) => {
+              e.preventDefault();
+              showRun(a.dataset.runId);
+              pollRun(a.dataset.runId);
+            }),
+        );
+        runList.forEach((x) => {
+          showRun(x.run_id);
+          pollRun(x.run_id);
+        });
+      } else {
+        $("#message").textContent = d.detail || "Failed";
+      }
+      await load();
+    };
+    function pollRun(id) {
+      let timer = setInterval(async () => {
+        let x = await fetch("/api/runs/" + encodeURIComponent(id)).then((r) =>
+          r.json(),
+        );
+        let detail = document.querySelector("#detail");
+        if (!detail) return;
+        let status = detail.querySelector("[data-run-status]"),
+          progress = detail.querySelector("[data-run-progress]"),
+          log = detail.querySelector("[data-run-log]");
+        if (status)
+          status.textContent =
+            "Status: " + x.status + " | Score: " + (x.score ?? "-");
+        if (progress)
+          progress.innerHTML =
+            (x.steps || [])
+              .map(
+                (s) =>
+                  "<tr><td>" +
+                  esc(s.name) +
+                  "</td><td>" +
+                  esc(s.status) +
+                  "</td><td>" +
+                  esc(s.detail) +
+                  "</td></tr>",
+              )
+              .join("") ||
+            '<tr><td colspan="3">Waiting for execution steps...</td></tr>';
+        if (log && x.artifacts?.execution_log)
+          log.textContent = x.artifacts.execution_log;
+        if (x.status !== "running") clearInterval(timer);
+      }, 2000);
+    }
+    const compareButton = $("#compare");
+    if (compareButton)
+      compareButton.onclick = async () => {
+        let ids = window.prompt("Enter run IDs separated by commas");
+        if (!ids) return;
+        let r = await fetch("/api/runs/compare", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(
+              ids
+                .split(",")
+                .map((x) => x.trim())
+                .filter(Boolean),
+            ),
+          }),
+          d = await r.json();
+        showComparison(d);
+      };
+    function showComparison(rows) {
+      $("#detail").innerHTML =
+        "<h2>Run comparison</h2><table><tr><th>Run</th><th>Model</th><th>Score</th><th>Document</th><th>Code</th><th>Tests</th><th>Reference</th><th>Efficiency</th></tr>" +
+        rows
+          .map(
+            (x) =>
+              "<tr>" +
+              [
+                "run_id",
+                "model",
+                "score",
+                "document",
+                "code",
+                "tests",
+                "reference",
+                "efficiency",
+              ]
+                .map((k) => "<td>" + esc(x[k]) + "</td>")
+                .join("") +
+              "</tr>",
+          )
+          .join("") +
+        "</table>";
+      $("#detailModal").classList.add("open");
+    }
+    ["#compareTasks", "#compareModels", "#taskIds"].forEach((sel) => {
+      let el = document.querySelector(sel);
+      if (el)
+        el.addEventListener("mousedown", (e) => {
+          if (e.target.tagName === "OPTION") {
+            e.preventDefault();
+            e.target.selected = !e.target.selected;
+            el.dispatchEvent(new Event("change"));
+          }
+        });
+    });
+    document.querySelectorAll("[data-run-view]").forEach(
+      (b) =>
+        (b.onclick = () => {
+          ["#compareTasks", "#compareModels", "#taskIds"].forEach((sel) => {
+            let el = document.querySelector(sel);
+            if (el)
+              el.addEventListener("mousedown", (e) => {
+                if (e.target.tagName === "OPTION") {
+                  e.preventDefault();
+                  e.target.selected = !e.target.selected;
+                  el.dispatchEvent(new Event("change"));
+                }
+              });
+          });
+          document
+            .querySelectorAll("[data-run-view]")
+            .forEach((x) => x.classList.remove("active"));
+          b.classList.add("active");
+          document
+            .querySelectorAll("#single-run,#batch-run")
+            .forEach(
+              (x) =>
+                (x.style.display =
+                  x.id === b.dataset.runView ? "block" : "none"),
+            );
+        }),
+    );
+    loadCapabilities();
+    load();
+    loadComparisons();
+    setInterval(loadComparisons, 2000);
+  </script>
+</html>

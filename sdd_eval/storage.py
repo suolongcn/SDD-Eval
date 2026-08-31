@@ -1,7 +1,7 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from .models import TaskSpec, RunResult, now, enrich_task_metadata
+from .models import TaskSpec, RunResult, ComparisonResult, now, enrich_task_metadata
 
 def datetime_from_iso(value):
     try:
@@ -11,7 +11,7 @@ def datetime_from_iso(value):
 class Store:
     def __init__(self, path: str = "sdd_eval.db"):
         self.path = path; Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with self.conn() as c: c.executescript("create table if not exists tasks (id text primary key, data text not null, created_at text not null); create table if not exists runs (id text primary key, task_id text not null, data text not null, created_at text not null); create table if not exists run_artifacts (run_id text primary key, documents text not null default '{}', generated_code text not null default '', repository_code text not null default '', created_at text not null); create table if not exists collections (id text primary key, data text not null, created_at text not null);")
+        with self.conn() as c: c.executescript("create table if not exists tasks (id text primary key, data text not null, created_at text not null); create table if not exists runs (id text primary key, task_id text not null, data text not null, created_at text not null); create table if not exists run_artifacts (run_id text primary key, documents text not null default '{}', generated_code text not null default '', repository_code text not null default '', created_at text not null); create table if not exists collections (id text primary key, data text not null, created_at text not null); create table if not exists comparisons (id text primary key, data text not null, created_at text not null);")
         self.migrate_legacy_runs()
         self.migrate_run_artifacts()
     def conn(self):
@@ -106,15 +106,23 @@ class Store:
         results = []
         for row in rows:
             result = RunResult.model_validate_json(row[0])
+            interrupted = result.artifacts.get("documents", {}).get("generation-error.md") if result.artifacts else None
+            if result.status == "running" and (interrupted or (result.started_at and now() - result.started_at > timedelta(minutes=30))):
+                result.status = "failed"
+                result.generation_status = "failed"
+                result.error = result.error or "Run interrupted before completion (worker process stopped)."
+                result.finished_at = now()
+                result.duration_ms = int((result.finished_at - result.started_at).total_seconds() * 1000)
+                result.steps.append({"name": "Run error", "status": "failed", "duration_ms": result.duration_ms, "detail": result.error})
+                with self.conn() as update:
+                    update.execute("update runs set data=? where id=?", (result.model_dump_json(), result.run_id))
             if result.started_at is None:
                 result.started_at = datetime_from_iso(row[1])
             if result.finished_at is None and result.duration_ms is not None:
-                from datetime import timedelta
                 result.finished_at = result.started_at + timedelta(milliseconds=result.duration_ms)
             if result.duration_ms is None:
                 result.duration_ms = result.metrics.get("total_duration_ms")
                 if result.duration_ms is not None and result.finished_at is None:
-                    from datetime import timedelta
                     result.finished_at = result.started_at + timedelta(milliseconds=result.duration_ms)
             results.append(result)
         return sorted(results, key=lambda r: r.started_at or now(), reverse=True)
@@ -140,3 +148,15 @@ class Store:
         return [TestCollection.model_validate_json(r[0]) for r in rows]
     def delete_collection(self, collection_id):
         with self.conn() as c: return c.execute("delete from collections where id=?", (collection_id,)).rowcount > 0
+
+    def put_comparison(self, comparison):
+        with self.conn() as c:
+            c.execute("insert or replace into comparisons values (?, ?, ?)", (comparison.comparison_id, comparison.model_dump_json(), comparison.started_at.isoformat()))
+
+    def get_comparison(self, comparison_id):
+        with self.conn() as c: row = c.execute("select data from comparisons where id=?", (comparison_id,)).fetchone()
+        return ComparisonResult.model_validate_json(row[0]) if row else None
+
+    def list_comparisons(self):
+        with self.conn() as c: rows = c.execute("select data from comparisons order by created_at desc").fetchall()
+        return [ComparisonResult.model_validate_json(row[0]) for row in rows]

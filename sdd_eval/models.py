@@ -99,11 +99,26 @@ class TaskSpec(BaseModel):
     reference_code_estimated: bool = False
 class RunCreate(BaseModel):
     task_id: str
+    task_ids: list[str] | None = None
     tool: str = "openspec"
     model: str = "gpt-5.6-luna"
     client: str | None = "codex"
     workspace: str | None = None
     models: list[str] | None = None
+
+class ComparisonCreate(BaseModel):
+    task_ids: list[str]
+    models: list[str]
+    tool: str = "openspec"
+    client: str | None = "codex"
+    workspace: str | None = None
+
+class ComparisonResult(BaseModel):
+    comparison_id: str
+    task_ids: list[str]
+    models: list[str]
+    run_ids: list[str]
+    started_at: datetime = Field(default_factory=now)
 
 class ProjectSearchResult(BaseModel):
     provider: str

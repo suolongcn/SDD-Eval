@@ -1,4 +1,4 @@
-from sdd_eval.models import TaskSpec
+from sdd_eval.models import TaskSpec, ComparisonResult, RunResult
 from sdd_eval.models import TokenUsage
 from sdd_eval.evaluator import evaluate
 from sdd_eval.adapters import OpenSpecAdapter
@@ -6,6 +6,8 @@ from sdd_eval.models import compose_client_model
 from sdd_eval.storage import Store
 from types import SimpleNamespace
 from pathlib import Path
+import re
+import shutil
 
 
 def test_openai_provider_retries_transient_disconnect(monkeypatch):
@@ -129,6 +131,53 @@ def test_dashboard_has_independent_client_model_selectors():
     assert 'id="client"' in html and 'id="model"' in html
     assert "Codex CLI" in html and "OpenCode CLI" in html
     assert 'value="gpt-5.6-luna">Luna' in html
+
+def test_runs_history_tab_follows_model_compare():
+    html = Path(__file__).parents[1].joinpath("sdd_eval", "dashboard.html").read_text(encoding="utf-8")
+    model_compare = re.search(r'<button[^>]+data-view="model-compare"[^>]*>\s*Model Compare\s*</button\s*>', html)
+    runs_history = re.search(r'<button[^>]+data-view="runs"[^>]*>\s*Runs History\s*</button\s*>', html)
+    assert model_compare and runs_history
+    assert model_compare.start() < runs_history.start()
+
+def test_comparison_history_is_persisted_and_summarized(tmp_path, monkeypatch):
+    from sdd_eval import api
+    comparison_store = Store(str(tmp_path / "comparisons.db"))
+    pending = RunResult(run_id="run-1", task_id="task-1", status="running")
+    comparison_store.put_run(pending)
+    monkeypatch.setattr(api, "store", comparison_store)
+    comparison = ComparisonResult(
+        comparison_id="comparison-1",
+        task_ids=["task-1"],
+        models=["gpt-5.6-luna"],
+        run_ids=["run-1"],
+    )
+    comparison_store.put_comparison(comparison)
+
+    summary = api.comparison_detail("comparison-1")
+
+    assert summary["status"] == "running"
+    assert summary["completed_runs"] == 0
+    assert summary["total_runs"] == 1
+    assert summary["started_at"]
+
+def test_dashboard_renders_persistent_comparison_history():
+    html = Path(__file__).parents[1].joinpath("sdd_eval", "dashboard.html").read_text(encoding="utf-8")
+    assert 'id="comparisonHistory"' in html
+    assert 'fetch("/api/comparisons")' in html
+    assert "View report" in html and "Average score" in html
+
+def test_dashboard_inline_script_has_valid_javascript():
+    if shutil.which("node") is None:
+        return
+    html = Path(__file__).parents[1].joinpath("sdd_eval", "dashboard.html").read_text(encoding="utf-8")
+    script = re.search(r"<script>([\s\S]*?)</script>", html).group(1)
+    import subprocess
+    result = subprocess.run(
+        ["node", "-e", "new Function(process.argv[1])", script],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 def test_task_created_at_is_archived_and_rendered(tmp_path):
     store = Store(str(tmp_path / "created-at.db"))
