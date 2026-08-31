@@ -1,0 +1,17 @@
+.dmux/
+
+# Local evaluation state and disposable run workspaces
+.sdd-runs/
+sdd_eval.db
+
+# Python build and test outputs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Temporary dashboard probes
+.tmp_dashboard.*
+
+# Local IDE scratch project
+untitled/
