@@ -1,0 +1,72 @@
+# Executable-Oracle Evaluation Protocol
+
+## Result dimensions
+
+Benchmark V2 reports three independent dimensions:
+
+1. **Functional outcome**: whether the issue was resolved without regression.
+2. **SDD process quality**: whether requirements remain traceable through specification, design, tasks, code, and tests.
+3. **Efficiency**: tokens, duration, attempts, and resource consumption.
+
+SDD quality and efficiency must never turn an unresolved patch into a resolved result.
+
+## Intended functional decision
+
+The future harness will use the following strict rule:
+
+```text
+resolved = patch_applied
+           AND all FAIL_TO_PASS tests pass
+           AND all PASS_TO_PASS tests pass
+           AND no forbidden change is detected
+```
+
+Functional outcomes are explicit: `resolved`, `unresolved`, `invalid_patch`, `build_failed`, `target_tests_failed`, `regression`, `agent_timeout`, `environment_error`, or `harness_error`.
+
+## SDD traceability
+
+`RequirementIR` provides stable requirement identifiers. `TraceLink` records evidence-bearing relationships across requirement, specification, design, task, code, and test artifacts. Missing and contradictory links remain visible rather than being hidden by an aggregate score.
+
+The first structural relationships are:
+
+- Requirement to specification
+- Requirement to design
+- Requirement to task
+- Requirement to code
+- Requirement to test
+- Specification to design
+- Design to task
+- Task to code
+
+LLM judging, if introduced later, is supplemental. Its model, prompt version, evidence, and confidence must be recorded, and judge failure cannot affect the functional outcome.
+
+## Regrading and identity
+
+A prediction is content-addressed by the SHA-256 hash of its exact UTF-8 model patch. Future evaluation cache keys must include at least:
+
+```text
+instance_id + patch_hash + environment_digest + harness_version + oracle_version
+```
+
+This prevents a changed patch or environment from incorrectly reusing an earlier result.
+
+## Docker grading sequence
+
+```text
+host: clone and checkout base_commit
+host: apply exact model patch
+host: reject forbidden paths
+host: apply private test patch
+docker: create resource-limited container
+docker: run trusted setup commands
+docker: disconnect setup network
+docker: build and run each test selector
+host: persist result and execution manifest
+docker: force-remove container
+```
+
+The Docker backend consumes a Prediction; it does not run the model. This keeps generation credentials and the private Oracle out of the same execution context.
+
+## Legacy behavior
+
+The current evaluator continues to create legacy weighted `RunResult` records until the executable harness is implemented and explicitly selected. No legacy score should be presented as a V2 resolved rate.

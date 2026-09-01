@@ -1,7 +1,7 @@
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
-from .models import TaskSpec, RunCreate, ComparisonCreate, ComparisonResult, TestCollection, CollectionRunCreate, RunResult, TokenUsage, CLIENTS, MODEL_NAMES, compose_client_model, enrich_task_metadata, now
+from .models import BenchmarkInstance, BenchmarkJob, BenchmarkJobCreate, Prediction, TaskSpec, RunCreate, ComparisonCreate, ComparisonResult, TestCollection, CollectionRunCreate, RunResult, TokenUsage, CLIENTS, MODEL_NAMES, compose_client_model, enrich_task_metadata, now
 from datetime import timedelta
 from .storage import Store
 from .evaluator import evaluate
@@ -14,6 +14,85 @@ import time
 app=FastAPI(title="SDD Eval",version="0.1.0"); store=Store()
 @app.get("/",response_class=HTMLResponse)
 def dashboard(): return (Path(__file__).parent/"dashboard.html").read_text(encoding="utf-8")
+
+@app.get("/api/benchmark-instances")
+def benchmark_instances(dataset_id: str | None = None, split: str | None = None):
+    return store.list_benchmark_instances(dataset_id=dataset_id, split=split)
+
+@app.get("/api/benchmark-instances/{instance_id}")
+def benchmark_instance(instance_id: str):
+    instance = store.get_benchmark_instance(instance_id)
+    if not instance: raise HTTPException(404, "benchmark instance not found")
+    return instance
+
+@app.post("/api/benchmark-instances")
+def create_benchmark_instance(instance: BenchmarkInstance):
+    store.put_benchmark_instance(instance)
+    return instance
+
+@app.get("/api/predictions")
+def predictions(instance_id: str | None = None):
+    return store.list_predictions(instance_id=instance_id)
+
+@app.get("/api/predictions/{prediction_id}")
+def prediction(prediction_id: str):
+    result = store.get_prediction(prediction_id)
+    if not result: raise HTTPException(404, "prediction not found")
+    return result
+
+@app.post("/api/predictions")
+def create_prediction(prediction: Prediction):
+    if not store.get_benchmark_instance(prediction.instance_id):
+        raise HTTPException(400, "unknown benchmark instance")
+    store.put_prediction(prediction)
+    return prediction
+
+@app.get("/api/evaluation-results-v2")
+def evaluation_results_v2(instance_id: str | None = None):
+    return store.list_evaluation_results_v2(instance_id=instance_id)
+
+@app.get("/api/instance-validations/{instance_id}")
+def instance_validation(instance_id: str):
+    result = store.get_instance_validation(instance_id)
+    if not result: raise HTTPException(404, "instance validation not found")
+    return result
+
+@app.get("/api/benchmark-jobs")
+def benchmark_jobs(status: str | None = None):
+    return store.list_jobs(status=status)
+
+@app.get("/api/benchmark-jobs/{job_id}")
+def benchmark_job(job_id: str):
+    job = store.get_job(job_id)
+    if not job: raise HTTPException(404, "benchmark job not found")
+    return job
+
+@app.get("/api/benchmark-jobs/{job_id}/attempts")
+def benchmark_job_attempts(job_id: str):
+    if not store.get_job(job_id): raise HTTPException(404, "benchmark job not found")
+    return store.list_job_attempts(job_id)
+
+@app.post("/api/benchmark-jobs")
+def create_benchmark_job(request: BenchmarkJobCreate):
+    if not store.get_benchmark_instance(request.instance_id): raise HTTPException(400, "unknown benchmark instance")
+    if request.prediction_id:
+        prediction = store.get_prediction(request.prediction_id)
+        if not prediction or prediction.instance_id != request.instance_id:
+            raise HTTPException(400, "prediction does not belong to benchmark instance")
+    job = BenchmarkJob(**request.model_dump()); store.put_job(job)
+    return job
+
+@app.post("/api/benchmark-jobs/{job_id}/cancel")
+def cancel_benchmark_job(job_id: str):
+    job = store.request_job_cancellation(job_id)
+    if not job: raise HTTPException(404, "benchmark job not found")
+    return job
+
+@app.post("/api/benchmark-jobs/{job_id}/retry")
+def retry_benchmark_job(job_id: str):
+    job = store.retry_job(job_id)
+    if not job: raise HTTPException(409, "job is missing or not retryable")
+    return job
 @app.get("/api/tasks")
 def tasks():
     return [enrich_task_metadata(task) for task in store.list_tasks()]

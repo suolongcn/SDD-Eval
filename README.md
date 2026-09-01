@@ -178,6 +178,50 @@ Test Case 使用 JSON 描述，建议至少包含：
 
 可参考 [examples/tasks/issue-backed-open-source.json](examples/tasks/issue-backed-open-source.json)。
 
+### Benchmark V2 数据交换
+
+Benchmark V2 使用独立数据表保存 SWE-bench-compatible 实例、私有 Oracle 和模型 Prediction，不会改变现有 Test Case 与历史 Run。导入 JSON 或 JSONL：
+
+```powershell
+sdd-eval import-swebench tasks.jsonl --dataset-id my-dataset --dataset-version v1 --split dev
+```
+
+公开导出默认排除 Gold Patch、Test Patch 和测试选择器：
+
+```powershell
+sdd-eval export-swebench public-tasks.jsonl --dataset-id my-dataset
+sdd-eval export-predictions predictions.jsonl
+```
+
+`--include-oracle` 只应由可信管理员用于备份或 Harness 数据准备，不能将其输出提供给 Agent。
+
+可信的本地 Benchmark V2 实例可以先验证 baseline/gold Oracle，再评测已经归档的 Prediction：
+
+```powershell
+sdd-eval validate-benchmark owner__repo-123
+sdd-eval evaluate-prediction <prediction-id>
+```
+
+LocalBackend 会固定检出 `base_commit`，先应用模型 Patch、再应用隐藏 Test Patch，并分别执行 FAIL_TO_PASS 和 PASS_TO_PASS。它会直接执行实例声明的命令，因此只适用于可信仓库；不可信任务必须等待 DockerBackend。
+
+安装 Docker 并为 Benchmark Instance 配置 `docker.image` 后，可使用隔离后端：
+
+```powershell
+sdd-eval validate-benchmark owner__repo-123 --backend docker
+sdd-eval evaluate-prediction <prediction-id> --backend docker
+```
+
+DockerBackend 支持复用本地镜像、显式拉取镜像或使用管理员配置的 Build Context 构建镜像。默认启用资源配额、只读根文件系统、capability 移除和 `no-new-privileges`，并在 Setup 完成后断开 Grading 网络。镜像构建配置不能来自不可信 Agent。
+
+生产执行建议通过持久化队列与独立 Worker，而不是由 Web 进程直接运行：
+
+```powershell
+sdd-eval enqueue-benchmark evaluate_prediction owner__repo-123 --prediction-id <prediction-id> --backend docker
+sdd-eval benchmark-worker --concurrency 4
+```
+
+队列使用 SQLite 原子领取，并记录每次 Attempt。Worker 定期续租；进程异常退出后，过期 Lease 会由下一个 Worker 恢复。失败按 `max_attempts` 重试，取消为协作式取消（最迟在当前 Backend 调用结束后生效）。管理端可使用 `/api/benchmark-jobs` 及其 `cancel`、`retry`、`attempts` 子接口。
+
 ## 评分与产物
 
 评测器综合分析规格文档、生成代码、测试结果、参考实现和执行效率。运行产物默认保存在 `.sdd-runs/`，结构化记录保存在 `sdd_eval.db`。这些本地运行数据已被 Git 忽略，不应提交到仓库。
@@ -235,6 +279,10 @@ python -m compileall -q sdd_eval tests
 ## 更多文档
 
 - [开发指南](DEVELOPMENT.md)
+- [Benchmark V2 架构](docs/architecture/benchmark-v2.md)
+- [可执行 Oracle 评测协议](docs/architecture/evaluation-protocol.md)
+- [Benchmark 安全边界](docs/architecture/security-boundary.md)
+- [Benchmark Job 与 Worker](docs/architecture/job-worker.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全策略](SECURITY.md)
 - [变更记录](CHANGELOG.md)
