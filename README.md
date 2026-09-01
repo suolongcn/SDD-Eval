@@ -79,6 +79,44 @@ sdd-eval import-task examples/tasks/issue-backed-open-source.json
 | **Model Compare** | 多选 Test Case 和模型，执行矩阵对比；查看每个任务的分项得分、模型平均分和历史对比记录。 |
 | **Runs History** | 查看所有运行的状态、开始时间、耗时和总分，并打开完整运行详情。 |
 
+## 页面截图
+
+### Overview
+
+汇总 Test Case 数量、运行次数、平均分和 Token 使用量，并列出最近八次运行。
+
+![Overview](docs/images/dashboard-overview.png)
+
+### Test Cases
+
+集中展示任务用途、项目来源、代码规模和参考 Issue，并提供快捷运行和删除操作。
+
+![Test Cases](docs/images/dashboard-test-cases.png)
+
+### Single Task
+
+通过单选下拉框选择 Test Case，然后配置客户端、模型和 SDD 工作流。
+
+![Single Task](docs/images/dashboard-single-task.png)
+
+### Model Compare
+
+选择多个 Test Case 和模型执行矩阵评测，并在同一页面查看历史对比结果。
+
+![Model Compare](docs/images/dashboard-model-compare.png)
+
+### Runs History
+
+按时间倒序展示全部运行，可查看状态、耗时、得分及详细结果。
+
+![Runs History](docs/images/dashboard-runs-history.png)
+
+### Run 详情
+
+以下为 Run `24b976b8811b` 的详情示例，包括评分、参考任务、构建测试状态和逐步执行记录。
+
+![Run 24b976b8811b details](docs/images/run-24b976b8811b-details.png)
+
 ## 操作手册
 
 ### 执行单个 Test Case
