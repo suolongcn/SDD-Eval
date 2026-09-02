@@ -8,11 +8,26 @@ Benchmark V2 reports three independent dimensions:
 2. **SDD process quality**: whether requirements remain traceable through specification, design, tasks, code, and tests.
 3. **Efficiency**: tokens, duration, attempts, and resource consumption.
 
+The persisted composite score is a 0-100 weighted score:
+
+```text
+functional = 50% * FAIL_TO_PASS rate + 50% * PASS_TO_PASS rate
+composite = 50% * functional + 25% * code quality + 25% * documentation quality
+```
+
+FAIL_TO_PASS and PASS_TO_PASS are therefore equally weighted within the
+functional half. Code quality checks patch validity, build success, forbidden
+changes, and basic patch hygiene. Documentation quality checks non-empty SDD
+documents, expected specification/design/plan naming, and requirement trace
+links. A failed build, invalid patch, or environment error forces the functional
+score to zero; quality scores cannot turn an unresolved patch into a resolved
+outcome.
+
 SDD quality and efficiency must never turn an unresolved patch into a resolved result.
 
 ## Intended functional decision
 
-The future harness will use the following strict rule:
+The harness uses the following strict rule:
 
 ```text
 resolved = patch_applied
@@ -66,7 +81,3 @@ docker: force-remove container
 ```
 
 The Docker backend consumes a Prediction; it does not run the model. This keeps generation credentials and the private Oracle out of the same execution context.
-
-## Legacy behavior
-
-The current evaluator continues to create legacy weighted `RunResult` records until the executable harness is implemented and explicitly selected. No legacy score should be presented as a V2 resolved rate.

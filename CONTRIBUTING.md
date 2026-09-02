@@ -8,4 +8,4 @@ Small, focused pull requests are easiest to review.
 4. Run `python -m pytest -q` and `python -m compileall -q sdd_eval tests`.
 5. Open a pull request using the repository template.
 
-Use clear Python and existing project patterns. Preserve API contracts and keep failure records queryable. Commit subjects should be imperative and under 72 characters, for example `Add retry handling for provider disconnects`.
+Use clear Python and existing project patterns. Preserve V2 contracts, Oracle secrecy, and queryable failure records. Commit subjects should be imperative and under 72 characters, for example `Add retry handling for expired jobs`.

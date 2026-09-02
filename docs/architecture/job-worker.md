@@ -2,7 +2,7 @@
 
 ## Responsibility boundary
 
-The API creates and manages durable jobs; it does not execute benchmark code. One or more independent `benchmark-worker` processes consume the queue and invoke the configured Local or Docker backend. Private oracles remain server-side and are never returned by job APIs.
+The API creates and manages durable jobs; it does not execute benchmark code. One or more independent `worker` processes consume the queue and invoke the configured Local or Docker backend. Private oracles remain server-side and are never returned by job APIs.
 
 ## State machine
 
@@ -31,8 +31,8 @@ Queued jobs cancel immediately. Running jobs set `cancellation_requested`; worke
 ## Operations
 
 ```powershell
-sdd-eval benchmark-worker --db sdd_eval.db --concurrency 4
-sdd-eval benchmark-worker --db sdd_eval.db --once
+sdd-eval worker --db sdd_eval.db --concurrency 4
+sdd-eval worker --db sdd_eval.db --once
 ```
 
 Run workers under a service manager and stop them gracefully. SQLite is appropriate for one-host execution; multi-host scheduling should replace the claim layer with a transactional shared queue while preserving the job contract.

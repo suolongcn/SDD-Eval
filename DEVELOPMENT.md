@@ -1,250 +1,221 @@
 # Development Guide
 
-This guide describes both the legacy SDD evaluation flow and the SWE-bench-inspired Benchmark V2 execution path. The two protocols intentionally use separate models, tables, and result semantics.
+SDD Eval is a V2-only executable-oracle benchmark. There is no compatibility layer for the former Task/Run workflow. Opening a database without V2 `schema_metadata` intentionally drops its application tables and creates the current schema.
 
-## Environment
-
-- Python 3.11 or newer
-- Git
-- Docker when running untrusted Benchmark V2 instances
-- Optional Codex CLI or OpenCode CLI for legacy generation runs
-- Language/build tooling required by repositories evaluated through the trusted Local backend
+## Setup and quality gates
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e .
-```
 
-Run the web service:
-
-```powershell
-sdd-eval serve --host 127.0.0.1 --port 8000
-```
-
-The dashboard is at `/`, API routes are under `/api`, and interactive FastAPI documentation is at `/docs`.
-
-## Quality gates
-
-```powershell
 python -m pytest -q
 python -m compileall -q sdd_eval tests
 git diff --check
 ```
 
-These are the same primary gates used by GitHub Actions. Keep runtime dependencies small, preserve unrelated working-tree changes, and add focused regression tests for changed behavior.
+Git and Python 3.11+ are required. Docker is required for untrusted workloads. Host language toolchains are only needed when developing with Local Backend.
 
-## Architecture map
+## Architecture
 
 | Module | Responsibility |
 | --- | --- |
-| `models.py` | Legacy and V2 API/storage contracts |
-| `storage.py` | SQLite persistence, atomic job claims, leases, retries, and attempts |
-| `benchmark_io.py` | SWE-bench-compatible JSON/JSONL import and export |
-| `harness.py` | Trusted local executable-oracle protocol |
-| `docker_backend.py` | Isolated container implementation of the same protocol |
-| `worker.py` | Durable Benchmark Job consumer and heartbeat loop |
-| `api.py` | Dashboard and HTTP management API; never exposes private Oracle data |
-| `cli.py` | Dataset, direct evaluation, queue, worker, and service commands |
-| `adapters.py` | Legacy OpenSpec/Superpowers workflows |
-| `providers.py` | Legacy model calls and retries |
-| `evaluator.py` | Legacy checkout, generation, validation, scoring, and archival |
+| `models.py` | Instance, Oracle, Prediction, Result, Validation, Job, and Attempt contracts |
+| `storage.py` | V2-only SQLite schema, CRUD, atomic claims, leases, cancellation, and retry |
+| `benchmark_io.py` | SWE-bench-compatible JSON/JSONL exchange |
+| `harness.py` | Checkout, patch ordering, test execution, and outcome classification |
+| `docker_backend.py` | Resource-limited and network-isolated container execution |
+| `worker.py` | Durable queue consumption and heartbeat maintenance |
+| `api.py` | Public V2 management API; private Oracle is never exposed |
+| `cli.py` | Dataset, Prediction, direct grading, queue, Worker, and service operations |
+| `dashboard.html` | V2 operational dashboard |
 
-Keep provider-specific behavior in `providers.py`. Benchmark execution behavior belongs behind the backend interface rather than in API handlers or workers.
-
-## Protocol boundary
-
-Legacy evaluation remains compatible with existing Test Cases and Runs:
+The canonical flow is:
 
 ```text
-TaskSpec -> adapter/provider -> RunResult
+BenchmarkInstance + private EvaluationOracle
+        |
+        +-- Agent-visible input -> Prediction
+                                  |
+                                  v
+                         BenchmarkJob / JobAttempt
+                                  |
+                                  v
+                         Local or Docker Backend
+                                  |
+                                  v
+                   EvaluationResult / InstanceValidationResult
 ```
 
-Benchmark V2 adds a separate executable-oracle path:
+## Data and privacy boundary
 
-```text
-BenchmarkInstance (public) + Prediction
-                    |
-                    v
-             Local/Docker backend <--- EvaluationOracle (private)
-                    |
-                    v
-             EvaluationResultV2
-```
+`BenchmarkInstance` is Agent-visible. It contains the repository, fixed base commit, issue, Requirement IR, constraints, environment commands, and Docker execution configuration.
 
-Do not reinterpret or migrate legacy `RunResult` scores into `EvaluationResultV2`. V2 first determines whether executable behavior is resolved, then stores SDD quality and efficiency as independent dimensions.
+`EvaluationOracle` is private. It contains the gold patch, hidden test patch, FAIL_TO_PASS/PASS_TO_PASS selectors, forbidden paths, and review metadata. Never place Oracle fields in:
 
-## Benchmark V2 contracts
+- Instance API responses
+- Prediction artifacts or logs
+- Job payloads, errors, or Attempt records
+- public JSONL exports
+- container mounts
 
-### Public instance
+The API deliberately has no Oracle route. `export-dataset --include-oracle` is an administrator-only backup operation.
 
-`BenchmarkInstance` contains information visible to an Agent: repository, fixed `base_commit`, problem statement, environment contract, Requirement IR, constraints, dataset identity, language, and public source references.
+## V2 database lifecycle
 
-`EnvironmentSpec` commands are argument arrays rather than shell strings. `{tests}` in `test_command` is replaced by one FAIL_TO_PASS or PASS_TO_PASS selector for each isolated test execution.
+`Store` uses an internal `schema_metadata.schema_version` (currently `3`). If metadata is absent or has another version, all existing application tables are dropped and the V2 schema is created. This includes databases from the former Task/Run implementation. The internal database revision is independent from the V2 public protocol version.
 
-### Private Oracle
+Current tables:
 
-`EvaluationOracle` contains the gold patch, hidden test patch, FAIL_TO_PASS/PASS_TO_PASS selectors, forbidden paths, and review metadata. It is persisted in `evaluation_oracles`, but there is deliberately no Oracle HTTP endpoint.
+- `schema_metadata`
+- `benchmark_instances`
+- `evaluation_oracles`
+- `predictions`
+- `evaluation_results`
+- `instance_validations`
+- `benchmark_jobs`
+- `job_attempts`
 
-Never add Oracle fields to public instance, prediction, job, logs, API errors, or exports. Public dataset export excludes Oracle data unless an administrator explicitly passes `--include-oracle`.
+Foreign keys cascade from Instance to Oracle, Prediction, Result, and Validation. Deleting an Instance therefore deletes its complete benchmark history. Never add fallback deserializers for former schemas.
 
-### Prediction and result
-
-`Prediction` archives the exact model patch and calculates its SHA-256 hash. It also records model/client/workflow identity, SDD artifacts, trace links, and token usage.
-
-`EvaluationResultV2` uses explicit outcomes such as `resolved`, `invalid_patch`, `build_failed`, `target_tests_failed`, `regression`, `agent_timeout`, and environment/harness errors. `resolved` must agree with the outcome, and passed test counts cannot exceed totals.
-
-## Importing and inspecting datasets
-
-Import SWE-bench JSON or JSONL into the separate V2 tables:
+## Dataset ingestion
 
 ```powershell
-sdd-eval import-swebench data.jsonl demo-verified --dataset-version 2026-09 --split verified
+sdd-eval import-dataset tasks.jsonl dataset-id --dataset-version v1 --split verified
+sdd-eval export-dataset public.jsonl --dataset-id dataset-id
+sdd-eval export-dataset backup.jsonl --dataset-id dataset-id --include-oracle
 ```
 
-Export public instances or stored predictions:
+Required source fields are `instance_id`, `repo`, `base_commit`, and `problem_statement`. SWE-bench `patch`, `test_patch`, `FAIL_TO_PASS`, and `PASS_TO_PASS` become the private Oracle. Import writes Instance and Oracle in one transaction.
+
+When adding a dataset adapter, produce the same two contracts. Do not add dataset-specific fields to the Harness or Result.
+
+## Prediction contract
+
+A `Prediction` stores the exact `model_patch`, its calculated SHA-256 hash, model/client/workflow identity, Token usage, documents, trace links, and logs. A supplied hash must match the patch.
+
+Prediction generation is intentionally outside the benchmark Harness. Agents or orchestration systems submit finished Predictions through `POST /api/predictions` or:
 
 ```powershell
-sdd-eval export-swebench public.jsonl --dataset-id demo-verified
-sdd-eval export-predictions predictions.jsonl
+sdd-eval import-predictions predictions.jsonl
 ```
 
-Only trusted administrative workflows should export Oracle data:
+## Executable-oracle protocol
+
+Evaluation order is a correctness and secrecy invariant:
+
+1. Create a disposable checkout at exact `base_commit`.
+2. Run setup commands.
+3. Apply the model patch.
+4. Inspect tracked and untracked changes for forbidden paths.
+5. Apply the hidden test patch.
+6. Run the build command.
+7. Run every FAIL_TO_PASS selector independently.
+8. Run every PASS_TO_PASS selector independently.
+9. Persist the classified outcome and execution manifest.
+
+The Agent patch is always applied before hidden tests. A Result is `resolved` only when the patch/build succeeds and both test groups pass completely. Target failures and regressions remain distinct outcomes.
+
+Instance validation separately proves:
+
+- target behavior fails on baseline;
+- preservation behavior passes on baseline;
+- the gold patch applies;
+- both groups pass with the gold patch.
 
 ```powershell
-sdd-eval export-swebench private.jsonl --include-oracle
+sdd-eval validate-instance owner__repo-123 --backend docker
+sdd-eval evaluate <prediction-id> --backend docker
 ```
 
-The persistence tables are additive: `benchmark_instances`, `evaluation_oracles`, `predictions`, `evaluation_results_v2`, `instance_validations`, `benchmark_jobs`, and `job_attempts`. Existing legacy tables are unchanged.
+## Backend extension
 
-## Executable-oracle lifecycle
+Backends implement:
 
-For each evaluation, the backend:
+```python
+validate_instance(instance, oracle, workspace=None) -> InstanceValidationResult
+evaluate(instance, oracle, prediction, workspace=None) -> EvaluationResult
+```
 
-1. Creates a disposable checkout at the exact `base_commit`.
-2. Runs trusted setup commands.
-3. Applies the model patch.
-4. Rejects edits to forbidden paths, including untracked files.
-5. Applies the hidden test patch.
-6. Runs the declared build command.
-7. Executes every FAIL_TO_PASS selector independently.
-8. Executes every PASS_TO_PASS selector independently.
-9. Classifies and persists an explicit outcome and execution manifest.
+Register a new backend in both `cli.backend_for()` and `worker.create_backend()`. Preserve checkout and patch ordering, outcome names, test counts, and the existing result shape.
 
-The ordering is intentional: the Agent patch must not see or overwrite hidden tests. A resolved result requires all target tests and preservation tests to pass.
+Local Backend executes commands directly on the host and is limited to trusted repositories. Docker Backend is the default and must preserve:
 
-Before publishing an instance, validate that the target behavior fails at baseline, preservation tests pass at baseline, and both groups pass after applying the gold patch:
+- explicit image or administrator-controlled build context;
+- CPU, memory, PID, and tmpfs limits;
+- capability drop and `no-new-privileges`;
+- optional read-only root and non-root user;
+- setup network disconnection before grading;
+- image identity, limits, platform, and network policy in the manifest.
+
+Default tests mock the Docker boundary. Release validation should additionally run a real-container smoke test.
+
+## Jobs, leases, and attempts
+
+Production grading is asynchronous:
 
 ```powershell
-sdd-eval validate-benchmark owner__repo-123 --backend docker
+sdd-eval enqueue validate_instance owner__repo-123 --backend docker
+sdd-eval enqueue evaluate_prediction owner__repo-123 --prediction-id <id> --backend docker
+sdd-eval worker --concurrency 4
 ```
 
-Direct evaluation is useful for development and debugging:
-
-```powershell
-sdd-eval evaluate-prediction <prediction-id> --backend local
-```
-
-The Local backend executes repository commands directly on the host and is only safe for trusted repositories. Use Docker for untrusted or shared benchmark workloads.
-
-## Docker backend
-
-An instance can reference a cached image, request an explicit registry pull, or use an administrator-controlled build context. Build context and Dockerfile selection must not come from Agent output.
-
-The Docker backend applies CPU, memory, PID, and temporary-filesystem limits; drops Linux capabilities; enables `no-new-privileges`; supports a read-only root filesystem; and disconnects setup networking before grading when configured. The result manifest records the image ID, platform, resource limits, network policy, backend version, and environment digest.
-
-Docker is optional for unit development. Contract tests mock the Docker CLI, but a release environment should also run a real-container smoke test.
-
-## Persistent Jobs and Workers
-
-Production Benchmark V2 work should be queued rather than executed inside the web process:
-
-```powershell
-sdd-eval enqueue-benchmark evaluate_prediction owner__repo-123 `
-  --prediction-id <prediction-id> --backend docker --max-attempts 3
-
-sdd-eval benchmark-worker --db sdd_eval.db --concurrency 4
-```
-
-Validation can use the same queue:
-
-```powershell
-sdd-eval enqueue-benchmark validate_instance owner__repo-123 --backend docker
-```
-
-The state flow is:
+State transitions:
 
 ```text
 queued -> preparing -> evaluating -> completed
    ^          |             |
-   +----------+-------------+-> queued (retry remains)
+   +----------+-------------+-> queued (retry available)
                               -> failed (attempt limit)
 
 queued/running -- cancellation requested --> cancelled
 ```
 
-`claim_job()` uses a SQLite `BEGIN IMMEDIATE` transaction, so concurrent workers cannot claim the same row. Each claim increments the attempt number and creates a `JobAttempt`. The Worker periodically refreshes `heartbeat_at` and `lease_expires_at`.
+`claim_job()` uses `BEGIN IMMEDIATE`; concurrent same-host Workers cannot claim the same row. Every claim increments `attempt` and inserts a `JobAttempt`. Heartbeats extend `lease_expires_at`. A future claimant marks stale Attempts `expired` and requeues their Jobs when attempts remain.
 
-Before claiming new work, a Worker recovers expired `preparing` or `evaluating` jobs. The interrupted attempt becomes `expired`; the job is requeued when attempts remain or becomes terminal after the limit. This is at-least-once execution, so new backends and result consumers must be idempotent around stable job, prediction, patch-hash, and result identifiers.
+Execution is at least once. Backend side effects and consumers must use stable Instance, Prediction, patch hash, Job, and Result identifiers. Running cancellation is cooperative at backend boundaries; queued cancellation is immediate. Explicit retry only accepts terminal failed/cancelled Jobs.
 
-Queued cancellation is immediate. Running cancellation is cooperative and is observed at backend boundaries; its latency is therefore bounded by the active command timeout. Explicit retry is accepted only for terminal `failed` or `cancelled` jobs.
+SQLite scheduling targets multiple Workers on one host. Multi-host deployment requires a transactional shared queue while retaining these contracts.
 
-Useful management endpoints:
+## HTTP API
 
-| Method and route | Purpose |
+| Route | Purpose |
 | --- | --- |
-| `POST /api/benchmark-jobs` | Create validation or evaluation job |
-| `GET /api/benchmark-jobs` | List jobs, optionally filtered by status |
-| `GET /api/benchmark-jobs/{id}` | Inspect state, lease, result ID, and error |
-| `GET /api/benchmark-jobs/{id}/attempts` | Inspect execution history |
-| `POST /api/benchmark-jobs/{id}/cancel` | Request cancellation |
-| `POST /api/benchmark-jobs/{id}/retry` | Requeue a terminal job |
+| `GET /api/summary` | Dashboard counters and resolve rate |
+| `/api/instances` | Public Instance CRUD |
+| `/api/predictions` | Prediction create/list/detail |
+| `/api/jobs` | Job create/list/detail |
+| `/api/jobs/{id}/attempts` | Attempt history |
+| `/api/jobs/{id}/cancel` | Cooperative cancellation |
+| `/api/jobs/{id}/retry` | Terminal Job retry |
+| `/api/results` | Evaluation results |
+| `/api/validations` | Instance validation history |
 
-SQLite scheduling is designed for multiple workers on one host. A multi-host deployment should replace the claim layer with a transactional shared queue while preserving the models and Worker contract.
-
-## Extending the Benchmark
-
-When adding a language or repository family:
-
-1. Express setup, build, and test invocation in `EnvironmentSpec` without shell interpolation.
-2. Configure a reproducible Docker image or administrator-owned build context.
-3. Add log parsing only inside the backend; keep result classification consistent.
-4. Construct baseline, gold, regression, invalid-patch, and timeout fixtures.
-5. Verify FAIL_TO_PASS and PASS_TO_PASS selectors independently.
-6. Confirm public API and export payloads contain no Oracle fields.
-
-When adding a new execution backend, implement `validate_instance(instance, oracle, workspace=None)` and `evaluate(instance, oracle, prediction, workspace=None)`. Register backend selection in both `worker.create_backend()` and the direct CLI helper. Preserve the patch/test ordering and return existing V2 result contracts rather than backend-specific response shapes.
+API handlers validate Instance existence, Oracle presence, and Prediction ownership before creating a Job. HTTP-created Jobs require Docker Backend; trusted Local execution is CLI-only. Instance HTTP creation also rejects administrator-only image build/pull settings. API handlers never execute repository code in the web process.
 
 ## Testing strategy
 
-Tests are grouped by responsibility:
+- `test_benchmark_v2.py`: destructive V2 schema initialization, contracts, persistence, import/export, and Oracle isolation
+- `test_local_harness.py`: real temporary Git repositories, patch ordering, forbidden paths, and outcomes
+- `test_docker_backend.py`: Docker commands, isolation policy, manifest, errors, and cleanup
+- `test_benchmark_jobs.py`: atomic claims, lease recovery, cancellation, retry, Worker persistence, and API validation
 
-- `test_benchmark_v2.py`: schema, persistence, import/export, and Oracle API isolation
-- `test_local_harness.py`: real Git patch application and outcome classification
-- `test_docker_backend.py`: Docker command, isolation, manifest, and cleanup contracts
-- `test_benchmark_jobs.py`: atomic claims, lease recovery, cancellation, retries, API, and Worker persistence
-
-Prefer real temporary Git repositories for harness behavior and fakes only at external boundaries such as Docker. Never require network access or credentials in the default test suite.
+Use real temporary Git repositories for protocol behavior and fakes only at external boundaries. The default suite must not require network access, credentials, or Docker.
 
 ## Troubleshooting
 
-- A job remains `queued`: confirm a Worker is running, `available_at` has passed, and its backend is supported.
-- A job repeatedly becomes `expired`: increase the lease only after confirming heartbeats are not blocked; inspect Attempt history and SQLite lock contention.
-- `environment_error`: verify Git/Docker availability, repository access, image configuration, and setup networking.
-- `invalid_patch`: verify the patch applies to the declared base commit and does not touch forbidden paths.
-- `target_tests_failed` versus `regression`: inspect FAIL_TO_PASS and PASS_TO_PASS results separately.
-- Cancellation appears delayed: the current implementation is cooperative; reduce backend command timeouts if faster interruption is required.
+- Old data disappeared: expected on first V2 startup; the migration is intentionally destructive.
+- Instance cannot enqueue: import its private Oracle through `import-dataset`.
+- Job remains queued: start `sdd-eval worker` and verify `available_at`.
+- Job becomes expired: inspect Attempt heartbeat and SQLite contention before increasing the Lease.
+- `invalid_patch`: verify the patch applies to the exact base commit and avoids forbidden paths.
+- `target_tests_failed`: one or more FAIL_TO_PASS selectors still fail.
+- `regression`: target tests pass but at least one PASS_TO_PASS selector fails.
+- cancellation is delayed: cancellation is cooperative and bounded by the active command timeout.
 
-## Task authoring and pull requests
+## Pull requests
 
-Legacy task files should include a stable ID, repository/revision, concrete requirements, acceptance scenarios, build/test commands, and an issue reference. Record merged PR and commit metadata when available.
+Describe schema, protocol, security, and operational impact. Update docs for changes to contracts, routes, CLI, outcomes, or Worker semantics. Never commit SQLite databases, private Oracle exports, disposable workspaces, secrets, or repository execution logs.
 
-Pull requests must describe compatibility, data migration, security, and operational impact. Do not commit API keys, SQLite databases, disposable workspaces, generated caches, or private benchmark exports. Update public documentation whenever contracts, commands, routes, outcomes, or worker semantics change.
-
-Additional design details are available in:
-
-- [Benchmark V2 architecture](docs/architecture/benchmark-v2.md)
-- [Executable evaluation protocol](docs/architecture/evaluation-protocol.md)
-- [Security boundary](docs/architecture/security-boundary.md)
-- [Job and Worker design](docs/architecture/job-worker.md)
+See also [V2 architecture](docs/architecture/benchmark-v2.md), [evaluation protocol](docs/architecture/evaluation-protocol.md), [security boundary](docs/architecture/security-boundary.md), and [Job/Worker design](docs/architecture/job-worker.md).

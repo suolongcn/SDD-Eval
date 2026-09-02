@@ -84,6 +84,33 @@ def prediction(instance_id: str, patch: str, prediction_id: str = "prediction-1"
     )
 
 
+def test_test_selector_placeholder_can_be_embedded_in_an_argument():
+    command = LocalEvaluationBackend()._expand_test_command(
+        ["mvnw.cmd", "-q", "-Dtest={tests}", "test"],
+        ["HealthEndpointOracleTest#healthEndpointReturnsOk"],
+    )
+    assert command == ["mvnw.cmd", "-q", "-Dtest=HealthEndpointOracleTest#healthEndpointReturnsOk", "test"]
+
+
+def test_apply_patch_accepts_lf_diff_for_lf_checkout_on_windows(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"first\nsecond\n")
+    patch = """diff --git a/source.txt b/source.txt
+index 66a52ee..75d8e14 100644
+--- a/source.txt
++++ b/source.txt
+@@ -1,2 +1,2 @@
+ first
+-second
++changed
+"""
+
+    result = LocalEvaluationBackend()._apply_patch(tmp_path, patch, "test patch")
+
+    assert result.passed, result.output
+    assert source.read_text(encoding="utf-8").splitlines() == ["first", "changed"]
+
+
 def test_gold_validation_and_prediction_resolve(tmp_path):
     instance, oracle, gold_patch, _, _ = benchmark_fixture(tmp_path)
     backend = LocalEvaluationBackend()
@@ -97,6 +124,7 @@ def test_gold_validation_and_prediction_resolve(tmp_path):
     assert validation.gold_fail_to_pass_passed
     assert validation.gold_pass_to_pass_passed
     assert result.outcome == "resolved" and result.resolved
+    assert result.score == 100
     assert result.fail_to_pass_passed == result.fail_to_pass_total == 1
     assert result.pass_to_pass_passed == result.pass_to_pass_total == 1
 
@@ -110,9 +138,24 @@ def test_target_failure_and_regression_are_distinct(tmp_path):
 
     assert target_failed.outcome == "target_tests_failed"
     assert target_failed.fail_to_pass_passed == 0
+    assert target_failed.score == 50
     assert regression.outcome == "regression"
     assert regression.fail_to_pass_passed == 1
     assert regression.pass_to_pass_passed == 0
+    assert regression.score == 50
+
+
+def test_composite_score_weights_functional_code_and_documentation(tmp_path):
+    instance, oracle, gold_patch, _, _ = benchmark_fixture(tmp_path)
+    prediction_value = prediction(instance.instance_id, gold_patch, "weighted")
+    prediction_value.artifacts.documents = {"spec.md": "requirements", "design.md": "design"}
+    result = LocalEvaluationBackend().evaluate(instance, oracle, prediction_value)
+
+    assert result.functional_score == 100
+    assert result.code_quality_score == 100
+    assert result.documentation_score == 80
+    assert result.score == 95
+    assert result.score_weights == {"functional": 0.5, "code_quality": 0.25, "documentation": 0.25}
 
 
 def test_empty_and_forbidden_patches_are_invalid(tmp_path):

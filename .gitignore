@@ -3,6 +3,8 @@
 # Local evaluation state and disposable run workspaces
 .sdd-runs/
 sdd_eval.db
+sdd-eval-server*.log
+.sdd-bench-repos/
 
 # Python build and test outputs
 __pycache__/

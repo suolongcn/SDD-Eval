@@ -1,292 +1,264 @@
-# SDD Eval
+# SDD Eval V2
 
-SDD Eval 是一个面向 Spec-Driven Development（SDD）的轻量级评测工作台。它将真实项目 Issue 转换为可重复执行的 Test Case，调用不同客户端、模型和 SDD 工作流完成代码生成，并统一保存文档、代码、构建测试证据、Token 使用量和评分结果。
+SDD Eval 是面向 Spec-Driven Development（SDD）Coding Agent 的 SWE-bench-compatible 评测平台。它把公开的仓库、Issue 和固定 `base_commit` 组成 Benchmark Instance，将 Agent 生成的代码 Patch、规格文档和追踪关系归档为 Prediction，再通过可执行 Oracle 在 Local 或 Docker 环境中验证目标行为和回归行为。
 
-![SDD Eval dashboard](docs/images/dashboard-overview.png)
+V2 只支持可执行 Oracle 协议：公开 Instance 与私有 `EvaluationOracle` 分离，隐藏测试不会进入 Agent 输入、Prediction 或公开导出。结果同时保留 FAIL_TO_PASS / PASS_TO_PASS 明细、执行 Manifest、SDD 产物和 50% 功能 + 25% 代码质量 + 25% 文档质量的 Composite 分数。
 
-## 核心功能
+![SDD Eval V2 dashboard](docs/images/dashboard-v2-overview.png)
 
-- **真实任务评测**：Test Case 可关联 GitHub、Gitee 或 GitCode 仓库、Issue、PR 和参考提交。
-- **多种 SDD 工作流**：支持 OpenSpec 和 Superpowers 的规格、计划、实现、测试流程。
-- **多客户端与模型**：支持 Codex CLI、OpenCode CLI、内置模型名称和 OpenAI-compatible HTTP 服务。
-- **单任务运行**：选择一个 Test Case、客户端、模型和 SDD 工作流后发起异步执行。
-- **模型横向对比**：对多个 Test Case 和多个模型执行矩阵评测，展示各维度及总分。
-- **过程可观测**：运行中持续记录状态、执行步骤、耗时和控制台日志。
-- **结果可追溯**：归档生成文档、生成代码、验证结果、评分依据和参考实现信息。
-- **本地持久化**：Test Case、运行历史和对比记录保存在 SQLite 中。
+> V2 是不兼容升级。旧版 Test Case、Run、Comparison 和旧版工作流适配器不再受支持；首次使用 V2 代码打开旧 SQLite 数据库时会清除旧应用表并重建当前 Schema。
+
+## 核心流程
+
+```text
+Benchmark Instance (公开需求、仓库、Base Commit)
+        +
+Evaluation Oracle (私有 Gold/Test Patch、测试选择器)
+        |
+        v
+Prediction (Agent Patch + SDD Artifacts)
+        |
+        v
+Persistent Job -> Local / Docker Worker
+        |
+        v
+FAIL_TO_PASS + PASS_TO_PASS
+        |
+        v
+Evaluation Result (Resolved / Regression / Failure)
+```
+
+## 功能
+
+- SWE-bench-compatible JSON/JSONL 数据导入与导出
+- 公开 `BenchmarkInstance` 与私有 `EvaluationOracle` 分离
+- Prediction Patch SHA-256 归档和 SDD Artifact/Trace Link 记录
+- 固定 `base_commit`、模型 Patch 优先、隐藏 Test Patch 后置的评测协议
+- FAIL_TO_PASS 与 PASS_TO_PASS 逐项独立执行
+- Local Backend 可信调试与 Docker Backend 隔离评测
+- CPU、内存、PID、只读根目录、Capability 和网络隔离策略
+- SQLite 持久化 Job、原子领取、Lease、Heartbeat、Attempt、重试和取消
+- 通过 Codex/OpenCode 与 OpenSpec/Superpowers 创建 `generate_and_evaluate` Job，自动生成 Prediction 并评测
+- 结果按 Functional 50%、Code 25%、Docs 25% 展示加权 Composite 分数
+- V2 看板：Instances、Predictions、Jobs、Results、Validations
 
 ## 环境要求
 
-- Python 3.11 或更高版本
+- Python 3.11+
 - Git
-- 执行真实生成任务时，需要安装并登录 Codex CLI 或 OpenCode CLI
-- 目标项目所需的构建工具，例如 Maven、Gradle、Node.js 或 Rust
+- Docker（评测不可信仓库时必须）
+- 使用 Agent 自动生成时需要对应的 Codex CLI 或 OpenCode CLI，以及选定的 SDD 工具
+- 目标仓库所需的构建工具（仅 Local Backend）
 
-## 快速开始
-
-### 1. 安装
-
-Windows PowerShell：
+## 安装与启动
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e .
-```
-
-macOS / Linux：
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
-```
-
-### 2. 启动服务
-
-```powershell
 sdd-eval serve --host 127.0.0.1 --port 8000
 ```
 
-如果没有使用 editable install，也可以直接启动 ASGI 服务：
-
-```powershell
-python -m uvicorn sdd_eval.api:app --host 127.0.0.1 --port 8000
-```
-
-启动后访问：
-
 - 看板：<http://127.0.0.1:8000>
-- FastAPI 接口文档：<http://127.0.0.1:8000/docs>
+- API 文档：<http://127.0.0.1:8000/docs>
 
-### 3. 导入示例 Test Case
+## 导入 Benchmark 数据
 
-```powershell
-sdd-eval import-task examples/tasks/issue-backed-open-source.json
+输入记录遵循 SWE-bench 核心字段：
+
+```json
+{
+  "instance_id": "owner__repo-123",
+  "repo": "owner/repo",
+  "base_commit": "0123456789abcdef",
+  "problem_statement": "Issue description",
+  "patch": "gold patch",
+  "test_patch": "hidden test patch",
+  "FAIL_TO_PASS": ["test_target_behavior"],
+  "PASS_TO_PASS": ["test_existing_behavior"]
+}
 ```
 
-刷新看板后，导入的任务会出现在 **Test Cases** 和 **Single Task** 中。
-
-## 看板功能说明
-
-| 页面 | 功能 |
-| --- | --- |
-| **Overview** | 展示 Test Case 数量、运行次数、平均分、Token 总量和最近运行记录。 |
-| **Test Cases** | 查看任务 ID、用途、创建时间、项目来源、参考代码规模和关联 Issue；可快速运行或删除任务。 |
-| **Single Task** | 单选一个 Test Case，并选择客户端、模型和 SDD 工作流执行评测。下拉框同时展示任务 ID、用途和所属项目，Task ID 自动取自所选任务。 |
-| **Model Compare** | 多选 Test Case 和模型，执行矩阵对比；查看每个任务的分项得分、模型平均分和历史对比记录。 |
-| **Runs History** | 查看所有运行的状态、开始时间、耗时和总分，并打开完整运行详情。 |
-
-## 页面截图
-
-### Overview
-
-汇总 Test Case 数量、运行次数、平均分和 Token 使用量，并列出最近八次运行。
-
-![Overview](docs/images/dashboard-overview.png)
-
-### Test Cases
-
-集中展示任务用途、项目来源、代码规模和参考 Issue，并提供快捷运行和删除操作。
-
-![Test Cases](docs/images/dashboard-test-cases.png)
-
-### Single Task
-
-通过单选下拉框选择 Test Case，然后配置客户端、模型和 SDD 工作流。
-
-![Single Task](docs/images/dashboard-single-task.png)
-
-### Model Compare
-
-选择多个 Test Case 和模型执行矩阵评测，并在同一页面查看历史对比结果。
-
-![Model Compare](docs/images/dashboard-model-compare.png)
-
-### Runs History
-
-按时间倒序展示全部运行，可查看状态、耗时、得分及详细结果。
-
-![Runs History](docs/images/dashboard-runs-history.png)
-
-### Run 详情
-
-以下为 Run `24b976b8811b` 的详情示例，包括评分、参考任务、构建测试状态和逐步执行记录。
-
-![Run 24b976b8811b details](docs/images/run-24b976b8811b-details.png)
-
-## 操作手册
-
-### 执行单个 Test Case
-
-1. 打开 **Single Task**。
-2. 在 Test Case 下拉框中选择任务。选项格式为 `任务 ID | 任务用途 | 项目名`，无需手工输入 Task ID。
-3. 选择执行客户端：`Codex CLI` 或 `OpenCode CLI`。
-4. 选择模型。
-5. 选择工作流：`OpenSpec` 或 `Superpowers`。
-6. 点击 **Run task**。
-7. 系统创建 Run ID 后会打开详情弹窗，并持续刷新运行状态和执行步骤。
-
-也可以在 **Test Cases** 页面点击目标任务右侧的 **Run**，系统会自动跳转并选中该任务。
-
-### 对比多个模型
-
-1. 打开 **Model Compare**。
-2. 在 Test Cases 列表中选择一个或多个任务。
-3. 在 Models 列表中选择一个或多个模型；列表项可直接点击切换选中状态。
-4. 选择客户端和工作流。
-5. 点击 **Run comparison**。
-6. 等待状态完成后查看：
-   - 每个 Test Case 下各模型的分项得分和总分；
-   - 按模型聚合的平均分；
-   - Comparison history 中保存的历史对比记录。
-
-一次对比会创建 `Test Case 数量 × 模型数量` 个独立运行。
-
-### 查看运行结果
-
-在 **Overview** 或 **Runs History** 中点击 **Details**，可查看：
-
-- 状态、总分、开始/结束时间和总耗时；
-- 模型、输入/输出 Token、构建结果和测试结果；
-- 执行步骤及其状态；
-- 控制台执行日志；
-- Document quality、Code quality、Test quality、Reference comparison、Efficiency 等评分依据；
-- 生成的规格/设计文档和代码；
-- 参考 Issue、PR 或实现代码规模。
-
-### 使用命令行运行
+导入：
 
 ```powershell
-sdd-eval run petclinic-issue-2600 --client codex --model gpt-5.6-luna --tool openspec
+sdd-eval import-dataset tasks.jsonl my-dataset --dataset-version v1 --split verified
 ```
 
-使用 `--model mock` 可离线检查完整评测管线。Mock 不生成真实实现，因此不会获得代码质量分。
-
-### 编写 Test Case
-
-Test Case 使用 JSON 描述，建议至少包含：
-
-- 稳定且唯一的 `id` 和清晰的 `title`；
-- `repository`、`revision` 和目标语言；
-- 具体的 requirements 与 acceptance scenarios；
-- `build_command` 和可选的 `test_command`；
-- 来源 Issue、参考 PR 或 reference commit；
-- 必须遵守的 constraints。
-
-可参考 [examples/tasks/issue-backed-open-source.json](examples/tasks/issue-backed-open-source.json)。
-
-### Benchmark V2 数据交换
-
-Benchmark V2 使用独立数据表保存 SWE-bench-compatible 实例、私有 Oracle 和模型 Prediction，不会改变现有 Test Case 与历史 Run。导入 JSON 或 JSONL：
-
-```powershell
-sdd-eval import-swebench tasks.jsonl --dataset-id my-dataset --dataset-version v1 --split dev
-```
+字段示例见 [`examples/datasets/demo-swebench.jsonl`](examples/datasets/demo-swebench.jsonl)；其中仓库和提交值仅用于展示格式，执行前应替换为真实可检出的来源。
 
 公开导出默认排除 Gold Patch、Test Patch 和测试选择器：
 
 ```powershell
-sdd-eval export-swebench public-tasks.jsonl --dataset-id my-dataset
-sdd-eval export-predictions predictions.jsonl
+sdd-eval export-dataset public.jsonl --dataset-id my-dataset
+sdd-eval export-dataset private-backup.jsonl --dataset-id my-dataset --include-oracle
 ```
 
-`--include-oracle` 只应由可信管理员用于备份或 Harness 数据准备，不能将其输出提供给 Agent。
+`--include-oracle` 只用于可信管理员备份，不能将输出交给 Agent。
 
-可信的本地 Benchmark V2 实例可以先验证 baseline/gold Oracle，再评测已经归档的 Prediction：
+## Prediction
+
+通过 API `POST /api/predictions`、看板或 JSONL 文件归档模型 Patch：
+
+```json
+{
+  "instance_id": "owner__repo-123",
+  "model_name_or_path": "coding-agent",
+  "client": "codex",
+  "workflow": "sdd",
+  "model_patch": "diff --git ...",
+  "artifacts": {
+    "documents": {"spec.md": "...", "design.md": "..."},
+    "trace_links": []
+  }
+}
+```
 
 ```powershell
-sdd-eval validate-benchmark owner__repo-123
-sdd-eval evaluate-prediction <prediction-id>
+sdd-eval import-predictions predictions.jsonl
+sdd-eval export-predictions archived-predictions.jsonl
 ```
 
-LocalBackend 会固定检出 `base_commit`，先应用模型 Patch、再应用隐藏 Test Patch，并分别执行 FAIL_TO_PASS 和 PASS_TO_PASS。它会直接执行实例声明的命令，因此只适用于可信仓库；不可信任务必须等待 DockerBackend。
+看板的 Predictions 页还可以直接选择客户端、模型和 SDD 工作流，创建 `generate_and_evaluate` Job。Worker 只向 Agent 提供公开 Instance，生成文档和代码 Patch 后再使用私有 Oracle 执行评测。
 
-安装 Docker 并为 Benchmark Instance 配置 `docker.image` 后，可使用隔离后端：
+### Spring Boot 全流程示例
+
+仓库附带一个可复现的 Spring Guides 种子脚本。它会从 GitHub codeload 获取三个官方小项目，在 `.sdd-bench-repos/` 创建本地固定快照，并导入 Instance、私有 Oracle、Gold Prediction、Validation Job 和 Evaluation Job：
 
 ```powershell
-sdd-eval validate-benchmark owner__repo-123 --backend docker
-sdd-eval evaluate-prediction <prediction-id> --backend docker
+python scripts/seed_spring_guides.py
+python -c "from sdd_eval.worker import run_workers; run_workers('sdd_eval.db', 6, 600, 1, True)"
 ```
 
-DockerBackend 支持复用本地镜像、显式拉取镜像或使用管理员配置的 Build Context 构建镜像。默认启用资源配额、只读根文件系统、capability 移除和 `no-new-privileges`，并在 Setup 完成后断开 Grading 网络。镜像构建配置不能来自不可信 Agent。
+这组任务覆盖健康检查端点、REST 参数规范化和 Bean Validation 年龄上限。由于本地快照会执行 Maven Wrapper，首次运行需要访问 Maven Central 下载依赖；源码快照和依赖缓存不提交到 Git。
 
-生产执行建议通过持久化队列与独立 Worker，而不是由 Web 进程直接运行：
+## 验证与评测
+
+发布数据集前验证 Baseline 和 Gold Oracle：
 
 ```powershell
-sdd-eval enqueue-benchmark evaluate_prediction owner__repo-123 --prediction-id <prediction-id> --backend docker
-sdd-eval benchmark-worker --concurrency 4
+sdd-eval validate-instance owner__repo-123 --backend docker
 ```
 
-队列使用 SQLite 原子领取，并记录每次 Attempt。Worker 定期续租；进程异常退出后，过期 Lease 会由下一个 Worker 恢复。失败按 `max_attempts` 重试，取消为协作式取消（最迟在当前 Backend 调用结束后生效）。管理端可使用 `/api/benchmark-jobs` 及其 `cancel`、`retry`、`attempts` 子接口。
-
-## 评分与产物
-
-评测器综合分析规格文档、生成代码、测试结果、参考实现和执行效率。运行产物默认保存在 `.sdd-runs/`，结构化记录保存在 `sdd_eval.db`。这些本地运行数据已被 Git 忽略，不应提交到仓库。
-
-## 配置
-
-使用 OpenAI-compatible HTTP 服务时，可设置：
-
-| 环境变量 | 用途 | 默认值 |
-| --- | --- | --- |
-| `SDD_EVAL_MODEL` | 默认模型或兼容服务模型名称 | 由调用参数决定 |
-| `SDD_EVAL_API_KEY` | 模型服务 API Key | 无 |
-| `SDD_EVAL_PROVIDER_RETRIES` | 临时网络错误重试次数 | `3` |
-
-模型选择器也可以直接传入 OpenAI-compatible 服务 URL。真实 Provider 失败时，OpenSpec Adapter 会在可用的情况下回退到工作区感知的 Codex CLI。
-
-> 不要提交 API Key、`sdd_eval.db`、`.sdd-runs/` 或包含敏感信息的执行日志。
-
-## 常见问题
-
-### 页面没有 Test Case
-
-先运行示例导入命令，然后刷新页面：
+直接评测 Prediction：
 
 ```powershell
-sdd-eval import-task examples/tasks/issue-backed-open-source.json
+sdd-eval evaluate <prediction-id> --backend docker
 ```
 
-### Run 长时间显示 running
+Local Backend 会直接执行 Instance 中声明的命令，只能用于可信仓库：
 
-真实运行会克隆项目、调用模型并执行构建测试，耗时取决于仓库规模和模型响应速度。可打开 **Details** 查看最新执行步骤；超过恢复阈值的中断任务会被标记为失败并保留错误信息。
+```powershell
+sdd-eval validate-instance owner__repo-123 --backend local
+sdd-eval evaluate <prediction-id> --backend local
+```
 
-### 客户端不可用
+## 持久化队列与 Worker
 
-确认对应 CLI 已加入 `PATH`，并在终端中完成登录。可先使用 `--model mock` 验证 SDD Eval 自身流程。
+生产环境应创建 Job 并由独立 Worker 执行：
 
-## 开发与测试
+```powershell
+sdd-eval enqueue validate_instance owner__repo-123 --backend docker
+sdd-eval enqueue evaluate_prediction owner__repo-123 --prediction-id <prediction-id> --backend docker
+sdd-eval worker --concurrency 4
+```
+
+Worker 使用 SQLite 原子领取任务，执行期间持续更新 Lease 和 Heartbeat。Worker 异常退出后，过期 Attempt 会标记为 `expired`，任务在剩余次数内重新排队。运行中取消属于协作式取消，最迟在当前 Backend 调用结束时生效。
+
+## 看板
+
+| Tab | 内容 |
+| --- | --- |
+| Overview | Instance、Prediction、活跃 Job、Result 和 Resolve Rate |
+| Instances | 数据集、仓库、Base Commit、Issue 和 Requirement IR |
+| Predictions | 模型、工作流、Patch Hash、Patch 和 SDD Artifacts |
+| Jobs | 状态、Backend、Attempt、Worker、Result、取消与重试 |
+| Results | Outcome、FAIL_TO_PASS、PASS_TO_PASS 和执行 Manifest |
+| Validations | Baseline/Gold 验证结果和错误日志 |
+
+## 看板截图
+
+以下截图来自当前 V2 看板的实际运行页面，数据仅用于展示界面和字段：
+
+### Instances
+
+按数据集和 Split 筛选公开 Instance，查看仓库、Base Commit、Issue/PR、官方变更行数和 Requirement 数量。
+
+![V2 Instances](docs/images/dashboard-v2-instances.png)
+
+### Predictions
+
+归档模型 Patch 和 SHA-256 Hash，查看客户端、模型、工作流，并从已有 Prediction 快速发起评测。
+
+![V2 Predictions](docs/images/dashboard-v2-predictions.png)
+
+### Jobs
+
+查看 `generate_and_evaluate`、`evaluate_prediction` 和 `validate_instance` 的状态、Backend、Attempt、耗时以及关联的 Prediction/Result。
+
+![V2 Jobs](docs/images/dashboard-v2-jobs.png)
+
+### Results
+
+对比 Functional、Code、Docs 三个分项和加权 Composite，同时查看 FAIL_TO_PASS、PASS_TO_PASS 通过数与 Harness 版本。
+
+![V2 Results](docs/images/dashboard-v2-results.png)
+
+### Validations
+
+发布数据集前检查 Baseline 和 Gold Oracle 是否满足目标失败、回归通过、Gold Patch 可应用及完整通过条件。
+
+![V2 Validations](docs/images/dashboard-v2-validations.png)
+
+## API
+
+主要接口：
+
+- `/api/summary`
+- `/api/instances`
+- `/api/predictions`
+- `/api/generations`
+- `/api/jobs`
+- `/api/jobs/{id}/attempts`
+- `/api/results`
+- `/api/validations`
+
+Oracle 没有公开 HTTP Route。通过 `/api/jobs` 创建的评测 Job 强制使用 Docker Backend；`generate_and_evaluate` 可通过看板或 `/api/generations` 提交，但选择 Local 时只能用于可信仓库。完整请求结构以 `/docs` 生成的 OpenAPI 文档为准。
+
+## 开发验证
 
 ```powershell
 python -m pytest -q
 python -m compileall -q sdd_eval tests
+git diff --check
 ```
 
 ## 项目结构
 
 | 路径 | 用途 |
 | --- | --- |
-| `sdd_eval/` | API、数据模型、Provider、Adapter、评测器、存储和看板 |
-| `tests/` | 单元测试与冒烟测试 |
-| `examples/tasks/` | 示例 Test Case 目录 |
-| `docs/images/` | README 和项目文档使用的截图 |
-| `.github/` | CI、Issue/PR 模板和仓库自动化配置 |
-| `DEVELOPMENT.md` | 本地开发和架构说明 |
+| `sdd_eval/models.py` | V2 数据契约 |
+| `sdd_eval/storage.py` | V2 Schema 和持久化 Job 调度 |
+| `sdd_eval/benchmark_io.py` | SWE-bench 数据交换 |
+| `sdd_eval/harness.py` | 可执行 Oracle 协议 |
+| `sdd_eval/docker_backend.py` | Docker 隔离实现 |
+| `sdd_eval/worker.py` | 独立 Worker |
+| `sdd_eval/api.py` | V2 HTTP API |
+| `sdd_eval/dashboard.html` | V2 看板 |
+| `docs/images/` | README 看板截图 |
+| `tests/` | Schema、Harness、Docker 和 Job 测试 |
 
-## 更多文档
+## 文档
 
-- [开发指南](DEVELOPMENT.md)
-- [Benchmark V2 架构](docs/architecture/benchmark-v2.md)
-- [可执行 Oracle 评测协议](docs/architecture/evaluation-protocol.md)
-- [Benchmark 安全边界](docs/architecture/security-boundary.md)
-- [Benchmark Job 与 Worker](docs/architecture/job-worker.md)
+- [开发者指南](DEVELOPMENT.md)
+- [V2 架构](docs/architecture/benchmark-v2.md)
+- [可执行 Oracle 协议](docs/architecture/evaluation-protocol.md)
+- [安全边界](docs/architecture/security-boundary.md)
+- [Job 与 Worker](docs/architecture/job-worker.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全策略](SECURITY.md)
-- [变更记录](CHANGELOG.md)
 
 ## License
 
-当前仓库尚未声明开源许可证。在公开发布版本或接受广泛外部贡献前，请先添加许可证。
+当前仓库尚未声明开源许可证。在公开发布或接受广泛外部贡献前，请先添加许可证。

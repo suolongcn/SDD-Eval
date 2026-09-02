@@ -15,7 +15,7 @@ body:
     id: reproduce
     attributes:
       label: Reproduction
-      description: Include commands, task ID, and run ID. Remove secrets.
+      description: Include commands, instance/prediction/job IDs, and the backend. Remove secrets and private Oracle data.
     validations:
       required: true
   - type: input

@@ -2,16 +2,11 @@
 
 ## Objective
 
-Benchmark V2 adds SWE-bench-compatible task and prediction contracts without changing the meaning of legacy `TaskSpec` or `RunResult` records. The primary functional outcome in V2 will be executable resolution; SDD process quality and efficiency remain independent result dimensions.
+Benchmark V2 is the only supported protocol. It combines SWE-bench-compatible instances and predictions with executable resolution, SDD traceability, and efficiency dimensions.
 
-## Compatibility boundary
+## Schema boundary
 
-| Protocol | Task model | Result model | Meaning |
-| --- | --- | --- | --- |
-| Legacy | `TaskSpec` | `RunResult` | Existing weighted document/code/test/reference/efficiency evaluation |
-| V2 | `BenchmarkInstance` + private `EvaluationOracle` | `EvaluationResultV2` | Executable-oracle outcome with separate SDD and efficiency metrics |
-
-Legacy rows are never rewritten into V2 outcomes. New V2 records use separate SQLite tables. A future UI must label and aggregate the protocols separately.
+The Store requires V2 schema metadata. A database without the current metadata is cleared and rebuilt; historical Task/Run records are not migrated or interpreted.
 
 ## Components
 
@@ -26,7 +21,7 @@ Agent runtime
 Persistent job queue -> independent workers
 
 Local/Docker evaluation harness
-  Prediction + EvaluationOracle + environment -> EvaluationResultV2
+  Prediction + EvaluationOracle + environment -> EvaluationResult
 ```
 
 ## Core contracts
@@ -35,34 +30,37 @@ Local/Docker evaluation harness
 
 Contains only information an agent may see: repository, base commit, problem statement, Requirement IR, constraints, dataset identity, language, and public source links.
 
+When available, `reference_code_lines` records the added and removed lines in the official reference PR. The count is derived while importing the private reference patch and is safe to expose with the public Instance metadata; `reference_code_estimated` marks externally supplied estimates.
+
 ### EvaluationOracle
 
 Contains gold patch, hidden test patch, FAIL_TO_PASS/PASS_TO_PASS selectors, forbidden paths, and review metadata. It is stored separately and is not exposed by the HTTP API.
 
 ### Prediction
 
-Captures the exact model patch, its SHA-256 hash, model/client/workflow identity, artifacts, trace links, token usage, and optional originating run.
+Captures the exact model patch, its SHA-256 hash, model/client/workflow identity, artifacts, trace links, and token usage.
 
-### EvaluationResultV2
+### EvaluationResult
 
-Reserves explicit executable outcomes and keeps `functional_metrics`, `sdd_metrics`, and `efficiency_metrics` independent. Phase 1 defines and stores the contract; a later harness phase will produce results.
+Uses explicit executable outcomes and keeps `functional_metrics`, `sdd_metrics`, and `efficiency_metrics` independent. Results expose `functional_score`, `code_quality_score`, `documentation_score`, and the weighted `score` composite. The weights are fixed at 50% functional, 25% code quality, and 25% documentation; FAIL_TO_PASS and PASS_TO_PASS contribute equally to the functional component.
 
 ## Persistence
 
-V2 adds the following append-only-compatible tables through `create table if not exists` migrations:
+V2 uses these application tables:
 
 - `benchmark_instances`
 - `evaluation_oracles`
 - `predictions`
-- `evaluation_results_v2`
+- `evaluation_results`
+- `instance_validations`
 - `benchmark_jobs`
 - `job_attempts`
 
-The existing `tasks`, `runs`, `run_artifacts`, `collections`, and `comparisons` tables are unchanged.
+Foreign-key cascades remove all dependent benchmark records when an Instance is deleted.
 
 ## Import and export
 
-The JSONL importer maps SWE-bench fields to a public instance and private oracle. Public export excludes oracle fields by default. Prediction export follows the standard `instance_id`, `model_name_or_path`, `model_patch` shape.
+The JSONL importer maps SWE-bench fields to a public Instance and private Oracle while preserving V2 environment, Docker, Requirement IR, constraint, and Oracle extensions. Public export excludes Oracle fields by default. Prediction export includes the standard `instance_id`, `model_name_or_path`, and `model_patch` fields plus the complete V2 identity, hash, artifacts, trace links, and usage metadata.
 
 ## Implemented executable-oracle foundation
 
@@ -80,7 +78,6 @@ Every result records the image ID, backend version, platform, network policy, re
 
 Benchmark evaluation and instance validation can be queued as durable `BenchmarkJob` records. Independent workers atomically claim jobs, maintain a lease, record attempts, recover expired work, apply bounded retries, and persist result identifiers. See [job-worker.md](job-worker.md).
 
-## Deferred work
+## Dashboard
 
-- Automatic Requirement IR extraction
-- V2 dashboard and benchmark reports
+The V2 dashboard directly represents Instances, Predictions, Jobs, Results, and Validations. Results show each score component and the weighted composite score.

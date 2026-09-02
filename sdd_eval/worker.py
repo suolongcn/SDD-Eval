@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 from .docker_backend import DockerEvaluationBackend
 from .harness import LocalEvaluationBackend
+from .generator import AgentGenerator
 from .storage import Store
 
 
@@ -22,11 +23,13 @@ class BenchmarkWorker:
     """Consumes durable benchmark jobs. Cancellation is cooperative at backend boundaries."""
 
     def __init__(self, store: Store, worker_id: str | None = None, lease_seconds: int = 60,
-                 backend_factory: Callable[[str], object] = create_backend):
+                 backend_factory: Callable[[str], object] = create_backend,
+                 generator_factory: Callable[[], AgentGenerator] = AgentGenerator):
         self.store = store
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
         self.lease_seconds = lease_seconds
         self.backend_factory = backend_factory
+        self.generator_factory = generator_factory
 
     def run_once(self) -> bool:
         job = self.store.claim_job(self.worker_id, self.lease_seconds)
@@ -47,20 +50,38 @@ class BenchmarkWorker:
             oracle = self.store.get_evaluation_oracle(job.instance_id)
             if not instance or not oracle:
                 raise ValueError("benchmark instance or private oracle not found")
-            if not self.store.heartbeat_job(job.job_id, self.worker_id, self.lease_seconds, "evaluating"):
-                self.store.finish_job(job.job_id, self.worker_id, error="job cancelled before evaluation")
-                return True
-            backend = self.backend_factory(job.backend)
             if job.kind == "validate_instance":
+                if not self.store.heartbeat_job(job.job_id, self.worker_id, self.lease_seconds, "evaluating"):
+                    self.store.finish_job(job.job_id, self.worker_id, error="job cancelled before evaluation")
+                    return True
+                backend = self.backend_factory(job.backend)
                 result = backend.validate_instance(instance, oracle, workspace=job.workspace)
                 self.store.put_instance_validation(result)
-                result_id = result.instance_id
+                result_id = result.validation_id
             else:
-                prediction = self.store.get_prediction(job.prediction_id)
+                if job.kind == "generate_and_evaluate":
+                    if not self.store.heartbeat_job(job.job_id, self.worker_id, self.lease_seconds, "generating"):
+                        self.store.finish_job(job.job_id, self.worker_id, error="job cancelled before generation")
+                        return True
+                    prediction = self.generator_factory().generate(
+                        instance, job.client, job.model, job.workflow, workspace=job.workspace,
+                    )
+                    self.store.put_prediction(prediction)
+                    attached = self.store.attach_job_prediction(job.job_id, self.worker_id, prediction.prediction_id)
+                    if not attached:
+                        self.store.finish_job(job.job_id, self.worker_id, error="job cancelled after generation")
+                        return True
+                    job.prediction_id = prediction.prediction_id
+                else:
+                    prediction = self.store.get_prediction(job.prediction_id)
                 if not prediction:
                     raise ValueError("prediction not found")
+                if not self.store.heartbeat_job(job.job_id, self.worker_id, self.lease_seconds, "evaluating"):
+                    self.store.finish_job(job.job_id, self.worker_id, error="job cancelled before evaluation")
+                    return True
+                backend = self.backend_factory(job.backend)
                 result = backend.evaluate(instance, oracle, prediction, workspace=job.workspace)
-                self.store.put_evaluation_result_v2(result)
+                self.store.put_evaluation_result(result)
                 result_id = result.evaluation_id
             self.store.finish_job(job.job_id, self.worker_id, result_id=result_id)
         except Exception as error:

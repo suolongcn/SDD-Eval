@@ -8,7 +8,7 @@ The agent may receive `BenchmarkInstance`, repository contents at `base_commit`,
 
 ### Evaluator-private zone
 
-`EvaluationOracle` contains gold/test patches, test selectors, forbidden paths, expected results, and quality review metadata. Only administrative import and the future evaluator may access it.
+`EvaluationOracle` contains gold/test patches, test selectors, forbidden paths, expected results, and quality review metadata. Only administrative import and the evaluator may access it.
 
 ### Public API zone
 
@@ -22,10 +22,6 @@ The HTTP API exposes benchmark instances and predictions. It intentionally provi
 4. Store the submitted model patch before grading.
 5. Record patch and environment hashes for auditability.
 6. Treat generated repositories and patches as untrusted input.
-
-## Future container requirements
-
-The Docker harness phase must use separate agent and grading steps, disable grading network access, apply CPU/memory/disk/time limits, prevent modification of harness or hidden tests, and remove containers after execution. Secrets must be passed only to the generation process and must not be persisted in logs or images.
 
 ## Implemented Docker controls
 
@@ -45,4 +41,4 @@ Image building is an administrative operation. `build_context` and `dockerfile` 
 
 Oracle records currently share the same SQLite database file but use a separate table and have no HTTP route. Stronger deployments should move oracles to a separate database or encrypted administrative store before exposing SDD Eval to untrusted tenants.
 
-`LocalEvaluationBackend` directly executes commands declared by a benchmark instance. It is restricted to trusted repositories and local development. Untrusted or multi-tenant evaluation must wait for the Docker backend and must never be exposed as an unauthenticated HTTP operation.
+`LocalEvaluationBackend` directly executes commands declared by a benchmark instance. It is restricted to trusted repositories and local development. Untrusted or multi-tenant evaluation must use the Docker backend and must never be exposed as an unauthenticated direct-execution HTTP operation.

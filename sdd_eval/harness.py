@@ -19,13 +19,15 @@ from typing import Sequence
 from .models import (
     BenchmarkInstance,
     EvaluationOracle,
-    EvaluationResultV2,
+    EvaluationResult,
     InstanceValidationResult,
     Prediction,
 )
 
 
 HARNESS_VERSION = "local-v1"
+
+SCORE_WEIGHTS = {"functional": 0.50, "code_quality": 0.25, "documentation": 0.25}
 
 
 @dataclass
@@ -95,10 +97,11 @@ class LocalEvaluationBackend:
         try:
             process = subprocess.run(
                 ["git", "apply", "--whitespace=nowarn", "-"], cwd=root,
-                input=patch, capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=120,
+                input=patch.encode("utf-8"), capture_output=True, timeout=120,
             )
-            return CommandResult(process.returncode == 0, process.returncode, (process.stdout or "") + (process.stderr or ""))
+            output = (process.stdout or b"").decode("utf-8", "replace")
+            output += (process.stderr or b"").decode("utf-8", "replace")
+            return CommandResult(process.returncode == 0, process.returncode, output)
         except (OSError, subprocess.TimeoutExpired) as error:
             return CommandResult(False, 1, str(error))
 
@@ -128,6 +131,9 @@ class LocalEvaluationBackend:
         for argument in command:
             if argument == "{tests}":
                 expanded.extend(selectors)
+                found_placeholder = True
+            elif "{tests}" in argument:
+                expanded.append(argument.replace("{tests}", ",".join(selectors)))
                 found_placeholder = True
             else:
                 expanded.append(argument)
@@ -170,6 +176,38 @@ class LocalEvaluationBackend:
             else:
                 result.pass_to_pass_passed = passed
 
+    @staticmethod
+    def _quality_scores(prediction: Prediction, execution: CheckoutResult, functional_score: float) -> tuple[float, float]:
+        """Return code and documentation scores from observable prediction evidence.
+
+        Older fixture predictions have no SDD artifacts; for those records we
+        retain a conservative functional score for both dimensions so legacy
+        results remain numerically stable. Generated predictions with explicit
+        artifacts are scored on patch hygiene and document completeness.
+        """
+        if not prediction.artifacts.documents and not prediction.artifacts.trace_links:
+            return functional_score, functional_score
+        if execution.error_kind or not execution.patch_applied or execution.forbidden_changes or not execution.build_passed:
+            code_score = 0.0
+        else:
+            patch_lines = prediction.model_patch.splitlines()
+            additions = [line[1:] for line in patch_lines if line.startswith("+") and not line.startswith("+++")]
+            hygiene_penalty = sum(line.rstrip() != line for line in additions)
+            code_score = max(0.0, round(100.0 - min(40.0, hygiene_penalty * 5.0), 2))
+        documents = {str(name): str(value).strip() for name, value in prediction.artifacts.documents.items()}
+        non_empty = sum(bool(value) for value in documents.values())
+        named_docs = sum(any(token in name.lower() for token in ("spec", "design", "requirement", "plan")) for name in documents)
+        trace_links = prediction.artifacts.trace_links
+        covered_links = sum(link.status == "covered" for link in trace_links)
+        if not documents:
+            documentation_score = 0.0
+        else:
+            documentation_score = min(
+                100.0,
+                round((min(non_empty, 2) / 2 * 60.0) + (min(named_docs, 2) / 2 * 20.0) + (covered_links > 0) * 20.0, 2),
+            )
+        return code_score, documentation_score
+
     def _execute_patch(self, instance: BenchmarkInstance, oracle: EvaluationOracle, model_patch: str, run_root: Path) -> CheckoutResult:
         result = CheckoutResult()
         root, acquisition_log = self._prepare_checkout(instance, run_root / "repo")
@@ -210,12 +248,12 @@ class LocalEvaluationBackend:
         oracle: EvaluationOracle,
         prediction: Prediction,
         workspace: str | Path | None = None,
-    ) -> EvaluationResultV2:
+    ) -> EvaluationResult:
         if instance.instance_id != oracle.instance_id or instance.instance_id != prediction.instance_id:
             raise ValueError("instance, oracle, and prediction identifiers must match")
         digest = self.environment_digest(instance)
         if not oracle.fail_to_pass:
-            return EvaluationResultV2(
+            return EvaluationResult(
                 prediction_id=prediction.prediction_id, instance_id=instance.instance_id,
                 outcome="harness_error", prediction_hash=prediction.patch_hash,
                 environment_digest=digest, harness_version=self.name,
@@ -236,11 +274,31 @@ class LocalEvaluationBackend:
             outcome = "regression"
         else:
             outcome = "resolved"
-        return EvaluationResultV2(
+        fail_to_pass_rate = execution.fail_to_pass_passed / len(oracle.fail_to_pass)
+        pass_to_pass_rate = execution.pass_to_pass_passed / len(oracle.pass_to_pass) if oracle.pass_to_pass else 1.0
+        # Functional quality is the 50% portion of the composite score. The
+        # two executable test families are equally important within it.
+        functional_score = 0.0 if execution.error_kind else round(((fail_to_pass_rate + pass_to_pass_rate) / 2) * 100, 2)
+        code_quality_score, documentation_score = self._quality_scores(prediction, execution, functional_score)
+        score = round(
+            functional_score * SCORE_WEIGHTS["functional"]
+            + code_quality_score * SCORE_WEIGHTS["code_quality"]
+            + documentation_score * SCORE_WEIGHTS["documentation"],
+            2,
+        )
+        documents = prediction.artifacts.documents
+        trace_links = prediction.artifacts.trace_links
+        covered_links = sum(link.status == "covered" for link in trace_links)
+        return EvaluationResult(
             prediction_id=prediction.prediction_id,
             instance_id=instance.instance_id,
             outcome=outcome,
             resolved=outcome == "resolved",
+            score=score,
+            functional_score=functional_score,
+            code_quality_score=code_quality_score,
+            documentation_score=documentation_score,
+            score_weights=SCORE_WEIGHTS.copy(),
             patch_applied=execution.patch_applied,
             build_passed=execution.build_passed,
             fail_to_pass_total=len(oracle.fail_to_pass),
@@ -253,7 +311,28 @@ class LocalEvaluationBackend:
             functional_metrics={
                 "error": execution.error,
                 "forbidden_changes": execution.forbidden_changes,
+                "score": functional_score,
+                "functional_score": functional_score,
+                "code_quality_score": code_quality_score,
+                "documentation_score": documentation_score,
+                "composite_score": score,
+                "score_weights": SCORE_WEIGHTS.copy(),
+                "fail_to_pass_rate": round(fail_to_pass_rate, 4),
+                "pass_to_pass_rate": round(pass_to_pass_rate, 4),
                 "logs": execution.logs,
+            },
+            sdd_metrics={
+                "workflow": prediction.workflow,
+                "document_count": len(documents),
+                "documents": sorted(documents),
+                "trace_link_count": len(trace_links),
+                "covered_trace_links": covered_links,
+            },
+            efficiency_metrics={
+                "input_tokens": prediction.token_usage.input_tokens,
+                "output_tokens": prediction.token_usage.output_tokens,
+                "estimated": prediction.token_usage.estimated,
+                "generation_latency_ms": prediction.token_usage.latency_ms,
             },
         )
 
