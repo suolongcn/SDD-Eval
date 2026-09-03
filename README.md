@@ -183,7 +183,7 @@ Worker 使用 SQLite 原子领取任务，执行期间持续更新 Lease 和 Hea
 
 ## 看板截图
 
-以下截图来自当前 V2 看板的实际运行页面，数据仅用于展示界面和字段：
+以下截图均在本次 README 更新时，从本地运行的 V2 看板实际页面重新截取，展示当前界面布局、中文文案和数据字段；页面中的数据仅用于演示。模型对比报告截图对应批次 `cmp-e233ba7c1228`：<http://localhost:8000/api/comparisons/cmp-e233ba7c1228/report.html>
 
 ### Instances
 
