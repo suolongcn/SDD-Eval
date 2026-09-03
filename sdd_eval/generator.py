@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import tempfile
@@ -62,6 +63,8 @@ class AgentGenerator:
         constraints = "\n".join(f"- {item}" for item in instance.constraints) or "- Preserve existing behavior and public APIs."
         if workflow == "openspec":
             process = "Use the installed OpenSpec workflow. Create proposal.md, design.md, and tasks.md under openspec/, then implement every task."
+        elif workflow == "codespec":
+            process = "Use the CodeSpec specification workflow. Create spec.md, design.md, and tasks.md under codespec/, then implement every task."
         else:
             process = "Use a Superpowers spec-plan-implement-test workflow. Create spec.md, plan.md, and tasks.md under superpowers/, then implement every task."
         return f"""Implement this benchmark Instance end to end using specification-driven development.
@@ -82,7 +85,10 @@ The implementation working directory is `{instance.environment.working_directory
 Workflow:
 {process}
 
-Inspect the repository before editing. Make the smallest production-quality source-code change that satisfies the requirements. Do not create or modify test files; the benchmark's private executable oracle supplies authoritative tests. Do not invent or search for hidden evaluator tests. Do not access paths outside this workspace. Run the configured build and existing tests when practical. Finish with actual source-code changes, not only documentation."""
+Design review contract:
+The design document must trace every requirement to exact implementation files/symbols and verification tests. Explicitly assess high availability (failover, degradation, recovery targets), high concurrency (capacity, limits, idempotency, backpressure, and race safety), dependency failures, observability, rollback, and testability. Include a Mermaid or equivalent flowchart with entry, decision/branch, success, and failure paths. For Java changes, run or document the Alibaba Java Coding Guidelines (P3C) result. Keep the design and the generated source patch consistent; do not claim behavior or files that the patch does not implement.
+
+Inspect the repository before editing. Make the smallest production-quality change that satisfies the requirements. Repository-owned tests may be changed when the public requirement explicitly concerns them. Never create, modify, search for, or infer hidden evaluator tests under `.sdd_eval_tests`; the benchmark applies those private tests only after generation. Do not access paths outside this workspace. Run the configured build and existing tests when practical. Finish with actual repository changes, not only documentation."""
 
     @staticmethod
     def _change_name(instance_id: str) -> str:
@@ -102,6 +108,8 @@ Inspect the repository before editing. Make the smallest production-quality sour
             logs.append((created.stdout or "") + (created.stderr or ""))
             if created.returncode:
                 raise AgentGenerationError(f"OpenSpec change creation failed: {logs[-1][-2000:]}")
+        elif workflow == "codespec":
+            (root / "codespec").mkdir(exist_ok=True)
         else:
             (root / "superpowers").mkdir(exist_ok=True)
         return logs
@@ -113,15 +121,55 @@ Inspect the repository before editing. Make the smallest production-quality sour
                 "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
                 "--model", model, prompt,
             ]
+        model = self._opencode_model(model)
         return [
             self._command("opencode"), "run", "--dir", str(root),
             "--format", "json", "--auto", "--model", model, prompt,
         ]
 
+    @staticmethod
+    def _opencode_model(model: str) -> str:
+        """Resolve friendly aliases to provider-qualified OpenCode model IDs."""
+        normalized = re.sub(r"[^a-z0-9]+", "", model.lower())
+        return {
+            "glm53": "gateway/glm-5.3",
+            "glm53flash": "gateway/glm-5.3-flash",
+            "minimax27": "gateway/minimax-2.7",
+        }.get(normalized, model)
+
+    @staticmethod
+    def _temporary_opencode_config(root: Path, model: str):
+        """Declare gateway models that work upstream but are absent from the local catalog."""
+        if model != "gateway/minimax-2.7":
+            return None
+        path = root / "opencode.json"
+        original = path.read_bytes() if path.exists() else None
+        try:
+            payload = json.loads(original.decode("utf-8")) if original else {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = {}
+        provider = payload.setdefault("provider", {}).setdefault("gateway", {})
+        provider.setdefault("models", {})["minimax-2.7"] = {
+            "name": "MiniMax 2.7", "tool_call": True,
+            "limit": {"context": 128000, "output": 8192},
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path, original
+
+    @staticmethod
+    def _restore_opencode_config(state) -> None:
+        if not state:
+            return
+        path, original = state
+        if original is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(original)
+
     def _documents(self, root: Path, agent_root: Path, workflow: str) -> dict[str, str]:
         root = root.resolve()
         agent_root = agent_root.resolve()
-        base = agent_root / ("openspec" if workflow == "openspec" else "superpowers")
+        base = agent_root / ("openspec" if workflow == "openspec" else "codespec" if workflow == "codespec" else "superpowers")
         documents = {}
         if base.exists():
             for path in base.rglob("*.md"):
@@ -134,14 +182,21 @@ Inspect the repository before editing. Make the smallest production-quality sour
             base = agent_root / "openspec" / "changes" / self._change_name(instance.instance_id)
             templates = {
                 "proposal.md": f"# Proposal\n\n## Problem\n{instance.problem_statement}\n\n## Requirements\n{requirements}\n",
-                "design.md": f"# Design\n\nImplement the smallest compatible change inside `{instance.environment.working_directory}`.\n\n## Requirements\n{requirements}\n",
+                "design.md": f"# Design\n\nImplement the smallest compatible change inside `{instance.environment.working_directory}`.\n\n## Requirements\n{requirements}\n\n## Implementation and Traceability\n- Files and symbols: TODO\n- Verification: TODO\n\n## Availability and Recovery\nState failover, degradation, timeout/retry behavior, and SLO/RTO/RPO targets, or record why this is not applicable.\n\n## Concurrency and Capacity\nState QPS/TPS or other bounds, synchronization/idempotency, rate limits, and backpressure, or record why this is not applicable.\n\n## Failure Handling and Observability\nDescribe error paths, rollback/compensation, metrics, logs, alerts, and test or load-test oracles.\n\n## Flowchart\n```mermaid\nflowchart TD\n    Start[Request] --> Decision{{Validate}}\n    Decision -->|success| Done[Success]\n    Decision -->|failure| Error[Error or fallback]\n```\n",
                 "tasks.md": "# Tasks\n\n" + "\n".join(f"- [x] Implement {item.id}: {item.description}" for item in instance.requirements) + "\n",
+            }
+        elif workflow == "codespec":
+            base = agent_root / "codespec"
+            templates = {
+                "spec.md": f"# CodeSpec\n\n## Problem\n{instance.problem_statement}\n\n## Requirements\n{requirements}\n",
+                "design.md": f"# Design\n\nImplement the requirements inside `{instance.environment.working_directory}`.\n\n## Traceability\n{requirements}\n",
+                "tasks.md": "# Tasks\n\n" + "\n".join(f"- [ ] Implement {item.id}: {item.description}" for item in instance.requirements) + "\n",
             }
         else:
             base = agent_root / "superpowers"
             templates = {
                 "spec.md": f"# Specification\n\n{instance.problem_statement}\n\n## Requirements\n{requirements}\n",
-                "plan.md": f"# Plan\n\nImplement and verify the required source-code change inside `{instance.environment.working_directory}`.\n",
+                "plan.md": f"# Plan\n\nImplement and verify the required source-code change inside `{instance.environment.working_directory}`.\n\n## Availability and Recovery\nState failover, degradation, timeout/retry behavior, and SLO/RTO/RPO targets, or record why this is not applicable.\n\n## Concurrency and Capacity\nState QPS/TPS or other bounds, synchronization/idempotency, rate limits, and backpressure, or record why this is not applicable.\n\n## Failure Handling and Observability\nDescribe error paths, rollback/compensation, metrics, logs, alerts, and test or load-test oracles.\n\n## Flowchart\n```mermaid\nflowchart TD\n    Start[Request] --> Decision{{Validate}}\n    Decision -->|success| Done[Success]\n    Decision -->|failure| Error[Error or fallback]\n```\n",
                 "tasks.md": "# Tasks\n\n" + "\n".join(f"- [x] {item.description}" for item in instance.requirements) + "\n",
             }
         base.mkdir(parents=True, exist_ok=True)
@@ -156,10 +211,9 @@ Inspect the repository before editing. Make the smallest production-quality sour
         self._run([self._command("git"), "add", "-N", "--", scope], root, 60)
         result = self._run([
             self._command("git"), "diff", "--binary", "--", scope,
-            f":(exclude){prefix}openspec/**", f":(exclude){prefix}superpowers/**",
+            f":(exclude){prefix}openspec/**", f":(exclude){prefix}codespec/**", f":(exclude){prefix}superpowers/**",
             f":(exclude){prefix}.codex/**", f":(exclude){prefix}.opencode/**",
-            f":(exclude){prefix}src/test/**", f":(exclude){prefix}tests/**",
-            f":(exclude){prefix}test/**", f":(exclude){prefix}__tests__/**",
+            f":(exclude){prefix}.sdd_eval_tests/**",
         ], root, 120)
         if result.returncode:
             raise AgentGenerationError(f"could not capture generated patch: {(result.stdout + result.stderr)[-2000:]}")
@@ -177,13 +231,14 @@ Inspect the repository before editing. Make the smallest production-quality sour
         guard. This also prevents agent-installed skills and workflow artifacts
         from being evaluated as code changes.
         """
-        normalized = path.replace("\\", "/").lstrip("./")
+        normalized = path.replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
         parts = normalized.split("/")
         lowered = normalized.lower()
-        if any(part in {".codex", ".opencode", "openspec", "superpowers", "tests", "test", "__tests__"} for part in parts):
+        if any(part in {".codex", ".opencode", "openspec", "codespec", "superpowers", ".sdd_eval_tests"} for part in parts):
             return True
-        return any(part.lower() == "src" and index + 1 < len(parts) and parts[index + 1].lower() in {"test", "tests"}
-                   for index, part in enumerate(parts))
+        return False
 
     @classmethod
     def _filter_patch(cls, patch: str, scope: str = ".") -> str:
@@ -213,16 +268,29 @@ Inspect the repository before editing. Make the smallest production-quality sour
                 raise AgentGenerationError(f"working_directory does not exist: {instance.environment.working_directory}")
             workflow_logs = self._prepare_workflow(agent_root, instance, client, workflow)
             prompt = self._prompt(instance, workflow)
-            result = self._run(self._agent_command(agent_root, client, model, prompt), agent_root)
+            # Large framework repositories routinely require more than twenty
+            # minutes for inspection, implementation, and local verification.
+            # Keep clone/workflow/test limits separate, but give the coding
+            # agent enough time to complete an end-to-end change.
+            resolved_model = self._opencode_model(model) if client == "opencode" else model
+            config_state = self._temporary_opencode_config(agent_root, resolved_model) if client == "opencode" else None
+            try:
+                result = self._run(
+                    self._agent_command(agent_root, client, model, prompt),
+                    agent_root,
+                    timeout=3600,
+                )
+            finally:
+                self._restore_opencode_config(config_state)
             output = (result.stdout or "") + (result.stderr or "")
             if result.returncode:
-                raise AgentGenerationError(f"{client} generation failed ({result.returncode}): {output[-4000:]}")
+                raise AgentGenerationError(f"{client} generation failed for {resolved_model} ({result.returncode}): {output[-4000:]}")
             self._ensure_documents(agent_root, instance, workflow)
             patch = self._patch(root, instance)
             documents = self._documents(root, agent_root, workflow)
         return Prediction(
             instance_id=instance.instance_id,
-            model_name_or_path=model,
+            model_name_or_path=self._opencode_model(model) if client == "opencode" else model,
             client=client,
             workflow=workflow,
             model_patch=patch,

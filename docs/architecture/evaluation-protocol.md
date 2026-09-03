@@ -17,11 +17,15 @@ composite = 50% * functional + 25% * code quality + 25% * documentation quality
 
 FAIL_TO_PASS and PASS_TO_PASS are therefore equally weighted within the
 functional half. Code quality checks patch validity, build success, forbidden
-changes, and basic patch hygiene. Documentation quality checks non-empty SDD
-documents, expected specification/design/plan naming, and requirement trace
-links. A failed build, invalid patch, or environment error forces the functional
-score to zero; quality scores cannot turn an unresolved patch into a resolved
-outcome.
+changes, basic patch hygiene, and the Alibaba Java Coding Guidelines (P3C) for
+changed Java files. Documentation quality checks requirement traceability,
+high-availability and high-concurrency decisions, complete success/failure
+flowcharts, failure handling, observability, testability, and consistency
+between named design artifacts and the actual code patch. See
+[quality-evaluation.md](quality-evaluation.md) for the check contract and
+weights. A failed build, invalid patch, or environment error forces the
+functional score to zero; quality scores cannot turn an unresolved patch into
+a resolved outcome.
 
 SDD quality and efficiency must never turn an unresolved patch into a resolved result.
 
@@ -53,7 +57,11 @@ The first structural relationships are:
 - Design to task
 - Task to code
 
-LLM judging, if introduced later, is supplemental. Its model, prompt version, evidence, and confidence must be recorded, and judge failure cannot affect the functional outcome.
+LLM judging, if introduced later, is supplemental. Its model, prompt version,
+evidence, and confidence must be recorded, and judge failure cannot affect the
+functional outcome. Deterministic quality findings are persisted in
+`quality_findings`, `code_quality_metrics`, `documentation_quality_metrics`,
+and `quality_gate`.
 
 ## Regrading and identity
 

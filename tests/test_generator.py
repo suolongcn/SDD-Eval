@@ -29,6 +29,12 @@ def test_agent_commands_preserve_client_and_model_selection(tmp_path):
     assert "opencode" in opencode[0] and opencode[opencode.index("--model") + 1] == "gpt-5.6-luna"
 
 
+def test_opencode_model_aliases_are_provider_qualified(tmp_path):
+    command = AgentGenerator()._agent_command(tmp_path, "opencode", "minimax-2.7", "do it")
+
+    assert command[command.index("--model") + 1] == "gateway/minimax-2.7"
+
+
 def test_openspec_change_name_collapses_consecutive_separators():
     name = AgentGenerator._change_name("spring-guides__gs-spring-boot-healthz")
 
@@ -44,7 +50,8 @@ def test_generation_prompt_limits_changes_to_instance_working_directory():
 
     assert "working directory is `complete`" in prompt
     assert "Do not edit sibling tutorial stages" in prompt
-    assert "Do not create or modify test files" in prompt
+    assert "Repository-owned tests may be changed" in prompt
+    assert "`.sdd_eval_tests`" in prompt
 
 
 def test_documents_are_collected_from_the_agent_working_directory(tmp_path):
@@ -90,10 +97,10 @@ def test_patch_excludes_sdd_and_client_files_inside_working_directory(tmp_path):
 
     assert "complete/src/App.java" in patch
     assert "complete/.codex" not in patch and "complete/openspec" not in patch
-    assert "complete/src/test" not in patch
+    assert "complete/src/test/AppTest.java" in patch
 
 
-def test_patch_filter_removes_workflow_and_test_diff_sections():
+def test_patch_filter_removes_workflow_and_hidden_evaluator_diff_sections():
     patch = """diff --git a/src/main.py b/src/main.py
 --- a/src/main.py
 +++ b/src/main.py
@@ -105,9 +112,9 @@ diff --git a/openspec/changes/demo/design.md b/openspec/changes/demo/design.md
 +++ b/openspec/changes/demo/design.md
 @@ -0,0 +1 @@
 +design
-diff --git a/src/test/test_main.py b/src/test/test_main.py
---- a/src/test/test_main.py
-+++ b/src/test/test_main.py
+diff --git a/.sdd_eval_tests/test_main.py b/.sdd_eval_tests/test_main.py
+--- a/.sdd_eval_tests/test_main.py
++++ b/.sdd_eval_tests/test_main.py
 @@ -0,0 +1 @@
 +test
 """
@@ -116,4 +123,16 @@ diff --git a/src/test/test_main.py b/src/test/test_main.py
 
     assert "src/main.py" in filtered
     assert "openspec/" not in filtered
-    assert "src/test/" not in filtered
+    assert ".sdd_eval_tests/" not in filtered
+
+
+def test_patch_filter_keeps_repository_owned_tests():
+    patch = """diff --git a/tests/test_public.py b/tests/test_public.py
+--- a/tests/test_public.py
++++ b/tests/test_public.py
+@@ -1 +1 @@
+-old
++new
+"""
+
+    assert AgentGenerator._filter_patch(patch) == patch

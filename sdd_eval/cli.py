@@ -8,11 +8,23 @@ from .benchmark_io import export_predictions, export_swebench, import_swebench
 from .docker_backend import DockerEvaluationBackend
 from .harness import LocalEvaluationBackend
 from .models import BenchmarkJob, BenchmarkJobCreate, Prediction
+from .comparison import build_comparison_report
 from .storage import Store
 from .worker import run_workers
 
 
 app = typer.Typer(no_args_is_help=True)
+
+@app.command("comparison-report")
+def comparison_report(output: str | None = None, instance_ids: str | None = None, models: str | None = None, db: str = "sdd_eval.db"):
+    """Emit a cross-model comparison report for completed evaluations."""
+    store = Store(db)
+    report = build_comparison_report(store.list_predictions(), store.list_evaluation_results(),
+        instance_ids=instance_ids.split(",") if instance_ids else None,
+        models=models.split(",") if models else None)
+    payload = json.dumps(report, ensure_ascii=False, indent=2)
+    if output: Path(output).write_text(payload + "\n", encoding="utf-8")
+    else: typer.echo(payload)
 
 
 def backend_for(name: str):

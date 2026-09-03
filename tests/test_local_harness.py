@@ -158,6 +158,23 @@ def test_composite_score_weights_functional_code_and_documentation(tmp_path):
     assert result.score_weights == {"functional": 0.5, "code_quality": 0.25, "documentation": 0.25}
 
 
+def test_configured_style_and_coverage_commands_affect_code_quality(tmp_path):
+    instance, oracle, gold_patch, _, _ = benchmark_fixture(tmp_path)
+    oracle.quality_review = {
+        "style_command": [sys.executable, "-c", "import sys; print('lint violation'); sys.exit(1)"],
+        "coverage_command": [sys.executable, "-c", "print('COVERAGE: 60%')"],
+        "coverage_threshold": 80,
+    }
+
+    result = LocalEvaluationBackend().evaluate(instance, oracle, prediction(instance.instance_id, gold_patch))
+
+    assert result.outcome == "resolved"
+    assert result.code_quality_score == 58.33
+    assert result.code_quality_metrics["command_checks"]["style"]["status"] == "failed"
+    assert result.code_quality_metrics["command_checks"]["coverage"]["status"] == "below_threshold"
+    assert {item["check_id"] for item in result.quality_findings} >= {"code_style", "test_coverage"}
+
+
 def test_empty_and_forbidden_patches_are_invalid(tmp_path):
     instance, oracle, gold_patch, _, regression_patch = benchmark_fixture(tmp_path)
     backend = LocalEvaluationBackend()

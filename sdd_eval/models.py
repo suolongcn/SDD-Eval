@@ -3,7 +3,7 @@ from typing import Any, Literal
 import hashlib
 import uuid
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def now() -> datetime:
@@ -21,7 +21,7 @@ def count_patch_changed_lines(patch: str) -> int:
 
 RequirementKind = Literal[
     "functional", "boundary", "compatibility", "performance", "security",
-    "concurrency", "non_functional",
+    "concurrency", "availability", "reliability", "scalability", "non_functional",
 ]
 
 
@@ -175,11 +175,16 @@ class EvaluationResult(BaseModel):
     fail_to_pass_passed: int = Field(default=0, ge=0)
     pass_to_pass_total: int = Field(default=0, ge=0)
     pass_to_pass_passed: int = Field(default=0, ge=0)
+    test_cases: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     environment_digest: str = ""
     harness_version: str = ""
     prediction_hash: str = ""
     functional_metrics: dict[str, Any] = Field(default_factory=dict)
     sdd_metrics: dict[str, Any] = Field(default_factory=dict)
+    code_quality_metrics: dict[str, Any] = Field(default_factory=dict)
+    documentation_quality_metrics: dict[str, Any] = Field(default_factory=dict)
+    quality_findings: list[dict[str, Any]] = Field(default_factory=list)
+    quality_gate: Literal["pass", "conditional", "fail", "not_applicable"] = "not_applicable"
     efficiency_metrics: dict[str, Any] = Field(default_factory=dict)
     execution_manifest: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=now)
@@ -210,8 +215,11 @@ class InstanceValidationResult(BaseModel):
 
 
 CodingClient = Literal["codex", "opencode"]
-CodingModel = Literal["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
-SDDWorkflow = Literal["openspec", "superpowers"]
+# Provider model catalogs evolve independently of this application. Keep the
+# client constrained, while accepting the full provider/model identifier used
+# by OpenCode (for example ``gateway/glm-5.3-flash``).
+CodingModel = str
+SDDWorkflow = Literal["openspec", "codespec", "superpowers"]
 
 
 class GenerationJobCreate(BaseModel):
@@ -222,6 +230,32 @@ class GenerationJobCreate(BaseModel):
     backend: Literal["local", "docker"] = "local"
     workspace: str | None = None
     max_attempts: int = Field(default=1, ge=1, le=20)
+
+
+class ComparisonRequest(BaseModel):
+    """Request a cross-model benchmark run or report."""
+    instance_ids: list[str] = Field(min_length=1)
+    models: list[str] = Field(min_length=1)
+    client: Literal["codex", "opencode"] = "opencode"
+    workflow: Literal["openspec", "codespec", "superpowers"] = "openspec"
+    backend: Literal["local", "docker"] = "docker"
+    max_attempts: int = Field(default=1, ge=1, le=20)
+
+    @field_validator("instance_ids", "models")
+    @classmethod
+    def validate_selection(cls, values: list[str]):
+        cleaned = [value.strip() for value in values if isinstance(value, str) and value.strip()]
+        if not cleaned:
+            raise ValueError("selection must contain at least one non-empty value")
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("selection must not contain duplicates")
+        return cleaned
+
+
+class ComparisonReportRequest(BaseModel):
+    instance_ids: list[str] | None = None
+    models: list[str] | None = None
+    batch_id: str | None = None
 
 
 JobStatus = Literal["queued", "preparing", "generating", "evaluating", "completed", "failed", "cancelled"]
@@ -238,6 +272,7 @@ class BenchmarkJobCreate(BaseModel):
     client: CodingClient | None = None
     model: CodingModel | None = None
     workflow: SDDWorkflow | None = None
+    batch_id: str | None = None
 
     @model_validator(mode="after")
     def validate_prediction(self):

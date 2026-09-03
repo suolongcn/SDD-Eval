@@ -12,6 +12,7 @@ import uuid
 
 from .harness import CheckoutResult, CommandResult, LocalEvaluationBackend
 from .models import BenchmarkInstance, EvaluationOracle, Prediction
+from .quality import command_quality_metrics, quality_command_policy
 
 
 DOCKER_HARNESS_VERSION = "docker-v1"
@@ -156,6 +157,7 @@ class DockerEvaluationBackend(LocalEvaluationBackend):
             result.forbidden_changes = self._forbidden_changes(self._changed_paths(root), oracle.forbidden_paths)
             if result.forbidden_changes:
                 result.error = "model patch modifies forbidden paths"; result.error_kind = "invalid_patch"; return result
+            self._run_code_quality(root, oracle, model_patch, result)
         test_patch = self._apply_patch(root, oracle.test_patch, "test patch")
         result.logs["test_patch"] = test_patch.output
         if not test_patch.passed:
@@ -196,15 +198,40 @@ class DockerEvaluationBackend(LocalEvaluationBackend):
             else:
                 result.build_passed = True
             for group_name, selectors in (("fail_to_pass", oracle.fail_to_pass), ("pass_to_pass", oracle.pass_to_pass)):
-                passed, outputs = 0, []
+                passed, outputs, cases = 0, [], []
                 for selector in selectors:
                     command = self._expand_test_command(instance.environment.test_command, [selector])
                     test = self._exec(container, container_cwd, command, instance.environment.test_timeout_seconds)
                     outputs.append(f"===== {selector} (exit {test.returncode}) =====\n{test.output}")
+                    cases.append({
+                        "selector": selector,
+                        "passed": test.passed,
+                        "returncode": test.returncode,
+                        "output": test.output,
+                    })
                     passed += int(test.passed)
                 result.logs[group_name] = "\n".join(outputs)
+                result.test_cases[group_name] = cases
                 if group_name == "fail_to_pass": result.fail_to_pass_passed = passed
                 else: result.pass_to_pass_passed = passed
+            policy = quality_command_policy(oracle)
+            timeout = policy["quality_timeout_seconds"]
+            style_command, coverage_command = policy.get("style_command"), policy.get("coverage_command")
+            style = self._exec(container, container_cwd, style_command, timeout) if style_command else None
+            coverage = self._exec(container, container_cwd, coverage_command, timeout) if coverage_command else None
+            metrics, findings = command_quality_metrics(
+                style_returncode=style.returncode if style else None,
+                style_output=style.output if style else "",
+                coverage_returncode=coverage.returncode if coverage else None,
+                coverage_output=coverage.output if coverage else "",
+                coverage_threshold=policy["coverage_threshold"],
+            )
+            result.code_quality_metrics["command_checks"] = metrics
+            result.quality_findings.extend(item.as_dict() for item in findings)
+            if style:
+                result.logs["code_style"] = style.output
+            if coverage:
+                result.logs["test_coverage"] = coverage.output
             return result
         finally:
             cleanup = self._docker(["rm", "--force", container], 60)

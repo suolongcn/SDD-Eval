@@ -42,7 +42,7 @@ Captures the exact model patch, its SHA-256 hash, model/client/workflow identity
 
 ### EvaluationResult
 
-Uses explicit executable outcomes and keeps `functional_metrics`, `sdd_metrics`, and `efficiency_metrics` independent. Results expose `functional_score`, `code_quality_score`, `documentation_score`, and the weighted `score` composite. The weights are fixed at 50% functional, 25% code quality, and 25% documentation; FAIL_TO_PASS and PASS_TO_PASS contribute equally to the functional component.
+Uses explicit executable outcomes and keeps `functional_metrics`, `sdd_metrics`, and `efficiency_metrics` independent. Results expose `functional_score`, `code_quality_score`, `documentation_score`, and the weighted `score` composite. The weights are fixed at 50% functional, 25% code quality, and 25% documentation; FAIL_TO_PASS and PASS_TO_PASS contribute equally to the functional component. Strict SDD review also persists `code_quality_metrics`, `documentation_quality_metrics`, `quality_findings`, and `quality_gate`. Design checks cover high availability, high concurrency, complete flowcharts, failure/observability/testability evidence, and implementation consistency. Changed Java files are checked against the Alibaba Java Coding Guidelines (P3C); see [quality-evaluation.md](quality-evaluation.md).
 
 ## Persistence
 

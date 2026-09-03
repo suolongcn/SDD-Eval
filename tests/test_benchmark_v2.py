@@ -299,10 +299,54 @@ def test_dashboard_only_contains_v2_navigation(tmp_path, monkeypatch):
     assert "Runs History" not in response.text
 
 
+def test_dashboard_prediction_loader_is_bound_without_inline_reference_error():
+    html = Path(__file__).parents[1].joinpath("sdd_eval", "dashboard.html").read_text(encoding="utf-8")
+    assert 'onchange="loadPredictions()"' not in html
+    assert "Object.assign(window, {loadInstances, loadPredictions" in html
+
+
 def test_dashboard_results_render_composite_score_dimensions():
     html = Path(__file__).parents[1].joinpath("sdd_eval", "dashboard.html").read_text(encoding="utf-8")
     for label in ("Functional 50%", "Code 25%", "Docs 25%", "Composite"):
         assert label in html
+
+
+def test_generation_capabilities_separates_opencode_gateway_models(monkeypatch):
+    monkeypatch.setattr(api, "_opencode_models", lambda: [
+        "alibaba-cn/glm-5.3",
+        "gateway/glm-5.3-flash",
+        "gateway/qwen3.8-flash",
+        "opencode/big-pickle",
+    ])
+
+    payload = TestClient(api.app).get("/api/generation-capabilities").json()
+
+    assert payload["gateway_models"] == ["gateway/glm-5.3-flash", "gateway/qwen3.8-flash"]
+    assert payload["opencode_models"] == [
+        "alibaba-cn/glm-5.3",
+        "gateway/glm-5.3-flash",
+        "gateway/qwen3.8-flash",
+        "opencode/big-pickle",
+    ]
+
+
+def test_model_comparison_uses_only_gateway_model_capability():
+    html = Path(__file__).parents[1].joinpath("sdd_eval", "dashboard.html").read_text(encoding="utf-8")
+    active_comparison_form = html.rsplit("window.openComparisonForm = async", 1)[1]
+    assert "capabilities.gateway_models?.length" in active_comparison_form
+    assert 'catalog.filter(model=>model.startsWith("gateway/"))' in active_comparison_form
+    assert '["gateway/glm-5.3","gateway/glm-5.3-flash","gateway/minimax-2.7"]' in active_comparison_form
+
+
+def test_dashboard_result_details_include_artifacts_scores_and_test_cases():
+    html = Path(__file__).parents[1].joinpath("sdd_eval", "dashboard.html").read_text(encoding="utf-8")
+    for label in ("测试用例", "SDD 文档", "代码变更", "评分依据", "proposal.md", "design.md", "spec.md"):
+        assert label in html
+    assert "/api/predictions/" in html
+    assert "model_patch" in html
+    assert "test_cases" in html
+    assert "renderMarkdown" in html
+    assert "renderDiff" in html
 
 
 def test_instances_tab_renders_official_pr_line_count():

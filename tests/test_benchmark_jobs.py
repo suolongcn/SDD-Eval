@@ -56,6 +56,21 @@ def test_cancellation_and_explicit_retry(tmp_path):
     assert retried.status == "queued" and not retried.cancellation_requested
 
 
+def test_failed_generation_job_can_retry_with_replacement_model(tmp_path):
+    store, instance, _ = prepared_store(tmp_path)
+    job = BenchmarkJob(job_id="job-model-denied", kind="generate_and_evaluate",
+                       instance_id=instance.instance_id, client="opencode",
+                       model="alibaba-cn/MiniMax/MiniMax-M2.7", workflow="openspec",
+                       status="failed")
+    store.put_job(job)
+
+    retried = store.retry_job(job.job_id, replacement_model="gateway/minimax-2.7")
+
+    assert retried.status == "queued"
+    assert retried.model == "gateway/minimax-2.7"
+    assert retried.max_attempts >= retried.attempt + 1
+
+
 def test_unresolved_completed_generation_job_can_be_retried(tmp_path):
     store, instance, prediction = prepared_store(tmp_path)
     result = EvaluationResult(prediction_id=prediction.prediction_id, instance_id=instance.instance_id,
@@ -116,6 +131,15 @@ def test_worker_generates_prediction_then_evaluates_it(tmp_path):
     assert completed.status == "completed"
     assert (prediction.client, prediction.model_name_or_path, prediction.workflow) == ("codex", "gpt-5.6-terra", "openspec")
     assert result.score == 100
+
+
+def test_generation_job_accepts_provider_qualified_opencode_model():
+    request = GenerationJobCreate(
+        instance_id="demo__job-1", client="opencode",
+        model="gateway/glm-5.3-flash", workflow="openspec",
+    )
+
+    assert request.model == "gateway/glm-5.3-flash"
 
 
 def test_validation_job_links_to_the_validation_record(tmp_path):

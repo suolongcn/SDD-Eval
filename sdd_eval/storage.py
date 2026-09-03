@@ -25,9 +25,13 @@ class Store:
         self._initialize()
 
     def conn(self):
-        connection = sqlite3.connect(self.path, timeout=5)
+        # WAL allows dashboard reads (including the frequent jobs poll) while a
+        # worker is committing updates.  A longer busy timeout prevents transient
+        # writer contention from surfacing as an HTTP 500.
+        connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
-        connection.execute("pragma busy_timeout=5000")
+        connection.execute("pragma busy_timeout=30000")
+        connection.execute("pragma journal_mode=wal")
         connection.execute("pragma foreign_keys=on")
         return connection
 
@@ -349,7 +353,7 @@ class Store:
             if job.status == "queued": job.status = "cancelled"; job.finished_at = now()
             self._write_job(connection, job); return job
 
-    def retry_job(self, job_id: str, allow_completed: bool = False):
+    def retry_job(self, job_id: str, allow_completed: bool = False, replacement_model: str | None = None):
         with self.conn() as connection:
             connection.execute("begin immediate")
             row = connection.execute("select data from benchmark_jobs where id=?", (job_id,)).fetchone()
@@ -360,6 +364,9 @@ class Store:
             if job.status == "completed":
                 job.result_id = None
                 if job.kind == "generate_and_evaluate": job.prediction_id = None
+            if replacement_model is not None:
+                if job.kind != "generate_and_evaluate": return None
+                job.model = replacement_model
             job.max_attempts = max(job.max_attempts, job.attempt + 1); job.status = "queued"; job.available_at = now()
             job.cancellation_requested = False; job.error = None; job.finished_at = None
             self._write_job(connection, job); return job

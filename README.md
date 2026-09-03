@@ -4,7 +4,7 @@ SDD Eval 是面向 Spec-Driven Development（SDD）Coding Agent 的 SWE-bench-co
 
 V2 只支持可执行 Oracle 协议：公开 Instance 与私有 `EvaluationOracle` 分离，隐藏测试不会进入 Agent 输入、Prediction 或公开导出。结果同时保留 FAIL_TO_PASS / PASS_TO_PASS 明细、执行 Manifest、SDD 产物和 50% 功能 + 25% 代码质量 + 25% 文档质量的 Composite 分数。
 
-![SDD Eval V2 dashboard](docs/images/dashboard-v2-overview.png)
+![SDD 评测平台 V2 概览](docs/images/dashboard-v2-overview.png)
 
 > V2 是不兼容升级。旧版 Test Case、Run、Comparison 和旧版工作流适配器不再受支持；首次使用 V2 代码打开旧 SQLite 数据库时会清除旧应用表并重建当前 Schema。
 
@@ -40,7 +40,10 @@ Evaluation Result (Resolved / Regression / Failure)
 - SQLite 持久化 Job、原子领取、Lease、Heartbeat、Attempt、重试和取消
 - 通过 Codex/OpenCode 与 OpenSpec/Superpowers 创建 `generate_and_evaluate` Job，自动生成 Prediction 并评测
 - 结果按 Functional 50%、Code 25%、Docs 25% 展示加权 Composite 分数
-- V2 看板：Instances、Predictions、Jobs、Results、Validations
+- V2 看板：概览、测试实例、预测结果、任务、评测结果、模型对比、实例校验
+- 模型批量对比：选择编码工具、SDD 工作流、多个测试实例和多个模型，自动创建实例 × 模型任务矩阵
+- 批量评测实时进度、按模型汇总得分、实例结果矩阵、逐次评测明细，以及 JSON/CSV/独立 HTML 报告下载
+- 评测详情分栏展示测试用例、SDD 文档、代码变更、评分依据和执行信息
 
 ## 环境要求
 
@@ -168,14 +171,15 @@ Worker 使用 SQLite 原子领取任务，执行期间持续更新 Lease 和 Hea
 
 ## 看板
 
-| Tab | 内容 |
+| 页面 | 内容 |
 | --- | --- |
-| Overview | Instance、Prediction、活跃 Job、Result 和 Resolve Rate |
-| Instances | 数据集、仓库、Base Commit、Issue 和 Requirement IR |
-| Predictions | 模型、工作流、Patch Hash、Patch 和 SDD Artifacts |
-| Jobs | 状态、Backend、Attempt、Worker、Result、取消与重试 |
-| Results | Outcome、FAIL_TO_PASS、PASS_TO_PASS 和执行 Manifest |
-| Validations | Baseline/Gold 验证结果和错误日志 |
+| 概览 | 测试实例、预测结果、进行中任务、评测结果和解决率 |
+| 测试实例 | 数据集、仓库、Base Commit、问题描述和需求数量 |
+| 预测结果 | 模型、客户端、工作流、补丁摘要和评测入口 |
+| 任务 | 批次、任务状态、工具/模型、预测结果和评测结果 |
+| 评测结果 | 结果、综合得分、功能/代码/文档得分和详情 |
+| 模型对比 | 批量任务进度、模型汇总、实例矩阵和运行明细 |
+| 实例校验 | Baseline/Gold 校验结果和错误日志 |
 
 ## 看板截图
 
@@ -185,33 +189,55 @@ Worker 使用 SQLite 原子领取任务，执行期间持续更新 Lease 和 Hea
 
 按数据集和 Split 筛选公开 Instance，查看仓库、Base Commit、Issue/PR、官方变更行数和 Requirement 数量。
 
-![V2 Instances](docs/images/dashboard-v2-instances.png)
+![V2 测试实例页面](docs/images/dashboard-v2-instances.png)
 
 ### Predictions
 
 归档模型 Patch 和 SHA-256 Hash，查看客户端、模型、工作流，并从已有 Prediction 快速发起评测。
 
-![V2 Predictions](docs/images/dashboard-v2-predictions.png)
+![V2 预测结果页面](docs/images/dashboard-v2-predictions.png)
 
 ### Jobs
 
 查看 `generate_and_evaluate`、`evaluate_prediction` 和 `validate_instance` 的状态、Backend、Attempt、耗时以及关联的 Prediction/Result。
 
-![V2 Jobs](docs/images/dashboard-v2-jobs.png)
+![V2 任务页面](docs/images/dashboard-v2-jobs.png)
 
 ### Results
 
 对比 Functional、Code、Docs 三个分项和加权 Composite，同时查看 FAIL_TO_PASS、PASS_TO_PASS 通过数与 Harness 版本。
 
-![V2 Results](docs/images/dashboard-v2-results.png)
+![V2 评测结果页面](docs/images/dashboard-v2-results.png)
 
 ### Validations
 
 发布数据集前检查 Baseline 和 Gold Oracle 是否满足目标失败、回归通过、Gold Patch 可应用及完整通过条件。
 
-![V2 Validations](docs/images/dashboard-v2-validations.png)
+![V2 实例校验页面](docs/images/dashboard-v2-validations.png)
+
+### 模型对比
+
+选择编码工具、SDD 工具、执行后端、测试实例和多个模型后，平台会创建完整的实例 × 模型评测组合，并实时显示批次进度。完成后可查看模型汇总、测试实例矩阵和逐次评测明细，也可以下载 JSON/CSV 报告或打开独立 HTML 报表。
+
+![V2 模型对比页面](docs/images/dashboard-v2-comparison.png)
 
 ## API
+
+### 多模型对比
+
+看板的“模型对比”页面支持选择编码客户端（OpenCode/Codex）、SDD 工作流（OpenSpec/CodeSpec/Superpowers）、一个或多个测试实例及多个模型。平台会为完整的“实例 × 模型”组合创建任务，并为每个任务分配 `batch_id`。对比页面会轮询实时进度，并在评测完成后展示按模型汇总的得分表和按实例展开的结果矩阵。
+
+对应的 HTTP 接口如下：
+
+```http
+POST /api/comparisons
+GET  /api/comparisons/batches
+GET  /api/comparisons/report?batch_id=<batch-id>
+```
+
+报告包含预期运行数与已完成运行数、解决率、综合得分和各维度得分、令牌/耗时平均值，以及逐测试实例的结果。看板支持下载当前批次的 JSON 和 CSV 报告，并提供独立 HTML 报表页面。
+
+默认模型包括 `GLM5.3`、`GLM5.3-flash` 和 `Minimax2.7`；网关模型列表也可以从 OpenCode 能力接口动态发现。
 
 主要接口：
 

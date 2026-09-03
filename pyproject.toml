@@ -12,5 +12,9 @@ Issues = "https://github.com/suolongcn/SDD-Eval/issues"
 dev = ["pytest>=8.0", "build>=1.2"]
 [project.scripts]
 sdd-eval = "sdd_eval.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["sdd_eval*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -23,6 +23,8 @@ from .models import (
     InstanceValidationResult,
     Prediction,
 )
+from .quality import (QualityFinding, assess_quality, check_alibaba_java,
+                      command_quality_metrics, quality_command_policy)
 
 
 HARNESS_VERSION = "local-v1"
@@ -43,7 +45,10 @@ class CheckoutResult:
     build_passed: bool = False
     fail_to_pass_passed: int = 0
     pass_to_pass_passed: int = 0
+    test_cases: dict[str, list[dict[str, object]]] = field(default_factory=dict)
     forbidden_changes: list[str] = field(default_factory=list)
+    code_quality_metrics: dict[str, object] = field(default_factory=dict)
+    quality_findings: list[dict[str, object]] = field(default_factory=list)
     logs: dict[str, str] = field(default_factory=dict)
     error: str | None = None
     error_kind: str | None = None
@@ -165,19 +170,65 @@ class LocalEvaluationBackend:
         for group_name, selectors in (("fail_to_pass", oracle.fail_to_pass), ("pass_to_pass", oracle.pass_to_pass)):
             passed = 0
             outputs = []
+            cases = []
             for selector in selectors:
                 command = self._expand_test_command(instance.environment.test_command, [selector])
                 test = self._run(command, cwd, instance.environment.test_timeout_seconds)
                 outputs.append(f"===== {selector} (exit {test.returncode}) =====\n{test.output}")
+                cases.append({
+                    "selector": selector,
+                    "passed": test.passed,
+                    "returncode": test.returncode,
+                    "output": test.output,
+                })
                 passed += int(test.passed)
             result.logs[group_name] = "\n".join(outputs)
+            result.test_cases[group_name] = cases
             if group_name == "fail_to_pass":
                 result.fail_to_pass_passed = passed
             else:
                 result.pass_to_pass_passed = passed
+        self._run_configured_quality(root, instance, oracle, result)
 
     @staticmethod
-    def _quality_scores(prediction: Prediction, execution: CheckoutResult, functional_score: float) -> tuple[float, float]:
+    def _run_code_quality(root: Path, oracle: EvaluationOracle, patch: str, result: CheckoutResult) -> None:
+        """Run the configured P3C command while the patched checkout exists."""
+        metrics, findings = check_alibaba_java(patch, root=root, policy=oracle.quality_review)
+        result.code_quality_metrics = metrics
+        result.quality_findings = [finding.as_dict() for finding in findings]
+        if metrics.get("applicable"):
+            result.logs["alibaba_java"] = str(metrics.get("tool_output") or "")
+
+    def _run_configured_quality(self, root: Path, instance: BenchmarkInstance,
+                                oracle: EvaluationOracle, result: CheckoutResult) -> None:
+        policy = quality_command_policy(oracle)
+        cwd = self._working_directory(root, instance)
+        timeout = policy["quality_timeout_seconds"]
+        style_command, coverage_command = policy.get("style_command"), policy.get("coverage_command")
+        style = self._run(style_command, cwd, timeout) if style_command else None
+        coverage = self._run(coverage_command, cwd, timeout) if coverage_command else None
+        metrics, findings = command_quality_metrics(
+            style_returncode=style.returncode if style else None,
+            style_output=style.output if style else "",
+            coverage_returncode=coverage.returncode if coverage else None,
+            coverage_output=coverage.output if coverage else "",
+            coverage_threshold=policy["coverage_threshold"],
+        )
+        result.code_quality_metrics["command_checks"] = metrics
+        result.quality_findings.extend(item.as_dict() for item in findings)
+        if style:
+            result.logs["code_style"] = style.output
+        if coverage:
+            result.logs["test_coverage"] = coverage.output
+
+    @staticmethod
+    def _quality_scores(
+        prediction: Prediction,
+        execution: CheckoutResult,
+        functional_score: float,
+        instance: BenchmarkInstance | None = None,
+        oracle: EvaluationOracle | None = None,
+    ) -> tuple[float, float]:
         """Return code and documentation scores from observable prediction evidence.
 
         Older fixture predictions have no SDD artifacts; for those records we
@@ -185,28 +236,45 @@ class LocalEvaluationBackend:
         results remain numerically stable. Generated predictions with explicit
         artifacts are scored on patch hygiene and document completeness.
         """
-        if not prediction.artifacts.documents and not prediction.artifacts.trace_links:
-            return functional_score, functional_score
-        if execution.error_kind or not execution.patch_applied or execution.forbidden_changes or not execution.build_passed:
-            code_score = 0.0
-        else:
-            patch_lines = prediction.model_patch.splitlines()
-            additions = [line[1:] for line in patch_lines if line.startswith("+") and not line.startswith("+++")]
-            hygiene_penalty = sum(line.rstrip() != line for line in additions)
-            code_score = max(0.0, round(100.0 - min(40.0, hygiene_penalty * 5.0), 2))
+        # Keep this helper's original three-argument behavior for callers that
+        # score legacy records.  Evaluations pass the instance/oracle below and
+        # receive the strict design and code review contract.
+        if instance is None:
+            if not prediction.artifacts.documents and not prediction.artifacts.trace_links:
+                return functional_score, functional_score
+            if execution.error_kind or not execution.patch_applied or execution.forbidden_changes or not execution.build_passed:
+                code_score = 0.0
+            else:
+                patch_lines = prediction.model_patch.splitlines()
+                additions = [line[1:] for line in patch_lines if line.startswith("+") and not line.startswith("+++")]
+                hygiene_penalty = sum(line.rstrip() != line for line in additions)
+                code_score = max(0.0, round(100.0 - min(40.0, hygiene_penalty * 5.0), 2))
+            return code_score, LocalEvaluationBackend._legacy_document_score(prediction)
+        report = assess_quality(
+            prediction,
+            instance,
+            oracle,
+            patch_applied=execution.patch_applied,
+            build_passed=execution.build_passed,
+            error_kind=execution.error_kind,
+            forbidden_changes=execution.forbidden_changes,
+            functional_score=functional_score,
+        )
+        return report.code_score, report.documentation_score
+
+    @staticmethod
+    def _legacy_document_score(prediction: Prediction) -> float:
+        """Compatibility score for pre-quality-review fixture records."""
         documents = {str(name): str(value).strip() for name, value in prediction.artifacts.documents.items()}
         non_empty = sum(bool(value) for value in documents.values())
         named_docs = sum(any(token in name.lower() for token in ("spec", "design", "requirement", "plan")) for name in documents)
-        trace_links = prediction.artifacts.trace_links
-        covered_links = sum(link.status == "covered" for link in trace_links)
+        covered_links = sum(link.status == "covered" for link in prediction.artifacts.trace_links)
         if not documents:
-            documentation_score = 0.0
-        else:
-            documentation_score = min(
-                100.0,
-                round((min(non_empty, 2) / 2 * 60.0) + (min(named_docs, 2) / 2 * 20.0) + (covered_links > 0) * 20.0, 2),
-            )
-        return code_score, documentation_score
+            return 0.0
+        return min(
+            100.0,
+            round((min(non_empty, 2) / 2 * 60.0) + (min(named_docs, 2) / 2 * 20.0) + (covered_links > 0) * 20.0, 2),
+        )
 
     def _execute_patch(self, instance: BenchmarkInstance, oracle: EvaluationOracle, model_patch: str, run_root: Path) -> CheckoutResult:
         result = CheckoutResult()
@@ -233,6 +301,7 @@ class LocalEvaluationBackend:
             result.error = "model patch modifies forbidden paths"
             result.error_kind = "invalid_patch"
             return result
+        self._run_code_quality(root, oracle, model_patch, result)
         test_patch = self._apply_patch(root, oracle.test_patch, "test patch")
         result.logs["test_patch"] = test_patch.output
         if not test_patch.passed:
@@ -279,7 +348,20 @@ class LocalEvaluationBackend:
         # Functional quality is the 50% portion of the composite score. The
         # two executable test families are equally important within it.
         functional_score = 0.0 if execution.error_kind else round(((fail_to_pass_rate + pass_to_pass_rate) / 2) * 100, 2)
-        code_quality_score, documentation_score = self._quality_scores(prediction, execution, functional_score)
+        quality = assess_quality(
+            prediction,
+            instance,
+            oracle,
+            patch_applied=execution.patch_applied,
+            build_passed=execution.build_passed,
+            error_kind=execution.error_kind,
+            forbidden_changes=execution.forbidden_changes,
+            functional_score=functional_score,
+            precomputed_code_quality=execution.code_quality_metrics or None,
+            precomputed_quality_findings=execution.quality_findings,
+        )
+        code_quality_score = quality.code_score
+        documentation_score = quality.documentation_score
         score = round(
             functional_score * SCORE_WEIGHTS["functional"]
             + code_quality_score * SCORE_WEIGHTS["code_quality"]
@@ -305,6 +387,7 @@ class LocalEvaluationBackend:
             fail_to_pass_passed=execution.fail_to_pass_passed,
             pass_to_pass_total=len(oracle.pass_to_pass),
             pass_to_pass_passed=execution.pass_to_pass_passed,
+            test_cases=execution.test_cases,
             prediction_hash=prediction.patch_hash,
             environment_digest=digest,
             harness_version=self.name,
@@ -327,7 +410,15 @@ class LocalEvaluationBackend:
                 "documents": sorted(documents),
                 "trace_link_count": len(trace_links),
                 "covered_trace_links": covered_links,
+                "quality_gate": quality.quality_gate,
+                "quality_findings": [finding.as_dict() for finding in quality.findings],
+                "code_quality": quality.code_metrics,
+                "documentation_quality": quality.documentation_metrics,
             },
+            code_quality_metrics=quality.code_metrics,
+            documentation_quality_metrics=quality.documentation_metrics,
+            quality_findings=[finding.as_dict() for finding in quality.findings],
+            quality_gate=quality.quality_gate,
             efficiency_metrics={
                 "input_tokens": prediction.token_usage.input_tokens,
                 "output_tokens": prediction.token_usage.output_tokens,
