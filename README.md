@@ -221,6 +221,12 @@ Worker 使用 SQLite 原子领取任务，执行期间持续更新 Lease 和 Hea
 
 ![V2 模型对比页面](docs/images/dashboard-v2-comparison.png)
 
+### 模型对比独立报告
+
+批次完成后可打开独立 HTML 报告，查看模型整体表现、测试实例 × 模型矩阵和逐次评测明细。
+
+![V2 模型对比独立报告](docs/images/dashboard-v2-comparison-report.png)
+
 ## API
 
 ### 多模型对比
