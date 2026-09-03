@@ -183,7 +183,7 @@ Worker 使用 SQLite 原子领取任务，执行期间持续更新 Lease 和 Hea
 
 ## 看板截图
 
-以下截图均在本次 README 更新时，从本地运行的 V2 看板实际页面重新截取，展示当前界面布局、中文文案和数据字段；页面中的数据仅用于演示。模型对比报告截图对应批次 `cmp-e233ba7c1228`：<http://localhost:8000/api/comparisons/cmp-e233ba7c1228/report.html>
+以下截图均在本次 README 更新时，从本地运行的 V2 看板实际页面重新截取，展示当前界面布局、中文文案和数据字段；页面中的数据仅用于演示。模型对比报告和排行榜截图对应批次 `cmp-2641ba88ee0d`：<http://localhost:8000/api/comparisons/cmp-2641ba88ee0d/report.html>
 
 ### Instances
 
@@ -226,6 +226,12 @@ Worker 使用 SQLite 原子领取任务，执行期间持续更新 Lease 和 Hea
 批次完成后可打开独立 HTML 报告，查看模型整体表现、测试实例 × 模型矩阵和逐次评测明细。
 
 ![V2 模型对比独立报告](docs/images/dashboard-v2-comparison-report.png)
+
+### 模型排行榜
+
+排行榜按平均综合得分展示各模型的运行次数、解决数量、解决率、功能得分、代码得分、文档得分和平均耗时。
+
+![V2 模型排行榜](docs/images/dashboard-v2-comparison-leaderboard.png)
 
 ## API
 
