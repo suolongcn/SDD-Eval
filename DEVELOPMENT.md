@@ -180,6 +180,20 @@ SQLite scheduling targets multiple Workers on one host. Multi-host deployment re
 
 ## HTTP API
 
+### Pull-request source integration
+
+`pr_sources.py` provides the forge boundary used by the dashboard and API. `PullRequestSourceService` performs repository search, merged-PR listing, changed-line filtering, and import. The API surface is:
+
+- `GET /api/pr-sources/repositories`
+- `GET /api/pr-sources/pulls`
+- `POST /api/pr-sources/import`
+
+Import is transactional: public instance metadata and the private executable Oracle are written together. The API returns neither gold patches nor hidden test selectors. Configure `GITHUB_TOKEN` for authenticated GitHub requests; unauthenticated requests remain supported with the provider's lower rate limits. Keep provider-specific parsing inside `pr_sources.py` so the worker and storage layers remain forge-agnostic.
+
+### Dashboard assets
+
+The dashboard shell is `sdd_eval/dashboard.html`; its active client bundle is served from `GET /dashboard.js` and implemented in `sdd_eval/dashboard.js`. Keep the bundle free of Oracle data and verify both the source-import and model-comparison flows when changing dashboard markup.
+
 | Route | Purpose |
 | --- | --- |
 | `GET /api/summary` | Dashboard counters and resolve rate |

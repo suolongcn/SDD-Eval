@@ -235,6 +235,18 @@ Worker 使用 SQLite 原子领取任务，执行期间持续更新 Lease 和 Hea
 
 ## API
 
+### GitHub / GitCode PR sources
+
+The dashboard can discover merged pull requests from GitHub or GitCode before importing them as benchmark instances. Search repositories by forge, language, and fuzzy project name, then filter merged PRs by changed-line count. Imported PRs retain public issue/PR links while the gold patch and executable Oracle remain private.
+
+```http
+GET  /api/pr-sources/repositories?forge=github&language=Python&name=flask
+GET  /api/pr-sources/pulls?forge=github&repository=pallets/flask&min_changed_lines=5&max_changed_lines=500
+POST /api/pr-sources/import
+```
+
+The source adapter uses the GitHub API when `GITHUB_TOKEN` is available and applies the configured rate-limit/error handling. GitCode is supported through the same adapter contract, so the dashboard workflow is identical for both forges.
+
 ### 多模型对比
 
 看板的“模型对比”页面支持选择编码客户端（OpenCode/Codex）、SDD 工作流（OpenSpec/CodeSpec/Superpowers）、一个或多个测试实例及多个模型。平台会为完整的“实例 × 模型”组合创建任务，并为每个任务分配 `batch_id`。对比页面会轮询实时进度，并在评测完成后展示按模型汇总的得分表和按实例展开的结果矩阵。
