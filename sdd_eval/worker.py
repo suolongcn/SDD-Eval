@@ -8,6 +8,7 @@ from collections.abc import Callable
 from .docker_backend import DockerEvaluationBackend
 from .harness import LocalEvaluationBackend
 from .generator import AgentGenerator
+from .models import Prediction
 from .storage import Store
 
 
@@ -15,7 +16,7 @@ def create_backend(name: str):
     if name == "local":
         return LocalEvaluationBackend()
     if name == "docker":
-        return DockerEvaluationBackend()
+        return DockerEvaluationBackend.for_host()
     raise ValueError(f"unsupported backend: {name}")
 
 
@@ -60,12 +61,29 @@ class BenchmarkWorker:
                 result_id = result.validation_id
             else:
                 if job.kind == "generate_and_evaluate":
-                    if not self.store.heartbeat_job(job.job_id, self.worker_id, self.lease_seconds, "generating"):
-                        self.store.finish_job(job.job_id, self.worker_id, error="job cancelled before generation")
-                        return True
-                    prediction = self.generator_factory().generate(
-                        instance, job.client, job.model, job.workflow, workspace=job.workspace,
+                    prediction = self.store.get_prediction(job.prediction_id) if job.prediction_id else None
+                    if prediction is None:
+                        if not self.store.heartbeat_job(job.job_id, self.worker_id, self.lease_seconds, "generating"):
+                            self.store.finish_job(job.job_id, self.worker_id, error="job cancelled before generation")
+                            return True
+                        prediction = self.generator_factory().generate(
+                            instance, job.client, job.model, job.workflow, workspace=job.workspace,
+                        )
+                    # Agents commonly add useful repository tests, but benchmark
+                    # Oracles protect those paths to prevent test tampering. Keep
+                    # the production hunks and deterministically discard only the
+                    # protected diff sections before archiving the prediction.
+                    filtered_patch = AgentGenerator._filter_patch(
+                        prediction.model_patch, forbidden_paths=oracle.forbidden_paths,
                     )
+                    if filtered_patch != prediction.model_patch:
+                        prediction = Prediction.model_validate({
+                            **prediction.model_dump(),
+                            "model_patch": filtered_patch,
+                            "patch_hash": "",
+                        })
+                    if not filtered_patch.strip():
+                        raise ValueError("prediction contains only Oracle-protected changes")
                     self.store.put_prediction(prediction)
                     attached = self.store.attach_job_prediction(job.job_id, self.worker_id, prediction.prediction_id)
                     if not attached:

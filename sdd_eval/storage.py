@@ -363,7 +363,6 @@ class Store:
             if job.status not in allowed: return None
             if job.status == "completed":
                 job.result_id = None
-                if job.kind == "generate_and_evaluate": job.prediction_id = None
             if replacement_model is not None:
                 if job.kind != "generate_and_evaluate": return None
                 job.model = replacement_model

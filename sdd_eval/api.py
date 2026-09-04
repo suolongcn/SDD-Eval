@@ -6,18 +6,21 @@ import html
 import shutil
 import subprocess
 import time
+import httpx
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from .models import BenchmarkInstance, BenchmarkJob, BenchmarkJobCreate, GenerationJobCreate, Prediction, ComparisonRequest, ComparisonReportRequest
 from .comparison import build_comparison_report
 from .generator import AgentGenerator
 from .storage import Store
+from .pr_sources import Forge, PullRequestImport, PullRequestSourceService, SizeRange
 
 
 app = FastAPI(title="SDD Eval", version="2.0.0")
 store = Store()
+pr_source_service = PullRequestSourceService()
 _model_cache: tuple[float, list[str]] = (0.0, [])
 
 
@@ -58,6 +61,15 @@ def dashboard():
     )
 
 
+@app.get("/dashboard.js", response_class=PlainTextResponse, include_in_schema=False)
+def dashboard_script():
+    return PlainTextResponse(
+        (Path(__file__).parent / "dashboard.js").read_text(encoding="utf-8"),
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/api/summary")
 def summary():
     return store.dashboard_summary()
@@ -90,6 +102,34 @@ def instance(instance_id: str):
     return value
 
 
+@app.get("/api/instance-test-summaries")
+def instance_test_summaries():
+    """Expose execution statistics without revealing private test selectors."""
+    summaries = []
+    for value in store.list_benchmark_instances():
+        results = store.list_evaluation_results(instance_id=value.instance_id)
+        validation = store.get_instance_validation(value.instance_id)
+        latest = results[0] if results else None
+        summaries.append({
+            "instance_id": value.instance_id,
+            "evaluation_count": len(results),
+            "latest_evaluation_id": latest.evaluation_id if latest else None,
+            "fail_to_pass": {
+                "passed": latest.fail_to_pass_passed,
+                "total": latest.fail_to_pass_total,
+            } if latest else None,
+            "pass_to_pass": {
+                "passed": latest.pass_to_pass_passed,
+                "total": latest.pass_to_pass_total,
+            } if latest else None,
+            "validation": {
+                "valid": validation.valid,
+                "validation_id": validation.validation_id,
+            } if validation else None,
+        })
+    return summaries
+
+
 @app.post("/api/instances")
 def create_instance(value: BenchmarkInstance):
     if value.docker.build_context or value.docker.dockerfile or value.docker.pull:
@@ -102,6 +142,44 @@ def create_instance(value: BenchmarkInstance):
 def delete_instance(instance_id: str):
     if not store.delete_benchmark_instance(instance_id): raise HTTPException(404, "benchmark instance not found")
     return {"deleted": instance_id}
+
+
+@app.get("/api/pr-sources/repositories")
+def search_source_repositories(
+    forge: Forge, name: str = "", language: str = "", limit: int = Query(default=20, ge=1, le=50),
+):
+    """Search public repositories without exposing provider credentials."""
+    try:
+        return pr_source_service.search_repositories(forge, name, language, limit)
+    except (ValueError, RuntimeError, httpx.HTTPError) as exc:
+        raise HTTPException(502 if not isinstance(exc, ValueError) else 400, str(exc)) from exc
+
+
+@app.get("/api/pr-sources/pulls")
+def search_source_pull_requests(
+    forge: Forge, repository: str, size: SizeRange = "all",
+    limit: int = Query(default=30, ge=1, le=100),
+):
+    """List merged PRs and filter by their exact additions + deletions."""
+    try:
+        return pr_source_service.list_pull_requests(forge, repository, size, limit)
+    except (ValueError, RuntimeError, httpx.HTTPError) as exc:
+        raise HTTPException(502 if not isinstance(exc, ValueError) else 400, str(exc)) from exc
+
+
+@app.post("/api/pr-sources/import")
+def import_source_pull_request(request: PullRequestImport):
+    """Create a public benchmark and private executable Oracle atomically."""
+    try:
+        instance, oracle = pr_source_service.import_pull_request(request)
+        if store.get_benchmark_instance(instance.instance_id):
+            raise HTTPException(409, "this pull request has already been imported")
+        store.put_benchmark_instance(instance, oracle)
+        return instance
+    except HTTPException:
+        raise
+    except (ValueError, RuntimeError, httpx.HTTPError) as exc:
+        raise HTTPException(502 if not isinstance(exc, ValueError) else 400, str(exc)) from exc
 
 
 @app.get("/api/predictions")

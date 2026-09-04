@@ -289,6 +289,44 @@ def test_public_api_never_exposes_oracle_routes(tmp_path, monkeypatch):
     assert client.get("/api/runs").status_code == 404
 
 
+def test_instance_test_summaries_expose_counts_without_private_selectors(tmp_path, monkeypatch):
+    store = Store(str(tmp_path / "api-summary.db"))
+    instance = sample_instance()
+    oracle = EvaluationOracle(
+        instance_id=instance.instance_id,
+        gold_patch="secret gold",
+        test_patch="secret tests",
+        fail_to_pass=["secret_target_test"],
+        pass_to_pass=["secret_regression_test"],
+    )
+    prediction = Prediction(instance_id=instance.instance_id, model_name_or_path="model", model_patch="patch")
+    result = EvaluationResult(
+        prediction_id=prediction.prediction_id,
+        instance_id=instance.instance_id,
+        outcome="resolved",
+        resolved=True,
+        fail_to_pass_passed=1,
+        fail_to_pass_total=1,
+        pass_to_pass_passed=2,
+        pass_to_pass_total=2,
+    )
+    store.put_benchmark_instance(instance, oracle)
+    store.put_prediction(prediction)
+    store.put_evaluation_result(result)
+    store.put_instance_validation(InstanceValidationResult(instance_id=instance.instance_id, valid=True))
+    monkeypatch.setattr(api, "store", store)
+
+    response = TestClient(api.app).get("/api/instance-test-summaries")
+    assert response.status_code == 200
+    [summary] = response.json()
+    assert summary["fail_to_pass"] == {"passed": 1, "total": 1}
+    assert summary["pass_to_pass"] == {"passed": 2, "total": 2}
+    assert summary["validation"]["valid"] is True
+    assert "secret_target_test" not in response.text
+    assert "secret_regression_test" not in response.text
+    assert "secret gold" not in response.text
+
+
 def test_dashboard_only_contains_v2_navigation(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "store", Store(str(tmp_path / "dashboard.db")))
     response = TestClient(api.app).get("/")

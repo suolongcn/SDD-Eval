@@ -2,7 +2,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from sdd_eval.harness import LocalEvaluationBackend
+from sdd_eval.harness import CommandResult, LocalEvaluationBackend
 from sdd_eval.models import BenchmarkInstance, EnvironmentSpec, EvaluationOracle, Prediction
 
 
@@ -90,6 +90,30 @@ def test_test_selector_placeholder_can_be_embedded_in_an_argument():
         ["HealthEndpointOracleTest#healthEndpointReturnsOk"],
     )
     assert command == ["mvnw.cmd", "-q", "-Dtest=HealthEndpointOracleTest#healthEndpointReturnsOk", "test"]
+
+
+def test_checkout_fetches_only_the_requested_commit(monkeypatch, tmp_path):
+    backend = LocalEvaluationBackend()
+    instance = BenchmarkInstance(
+        instance_id="large-repo", repo="https://github.com/acme/large.git",
+        base_commit="abc123", problem_statement="Test shallow acquisition.",
+    )
+    calls = []
+
+    def capture(command, cwd, timeout):
+        calls.append((list(command), timeout))
+        if command[1] == "init":
+            (tmp_path / "repo").mkdir()
+        return CommandResult(True, 0, "ok\n")
+
+    monkeypatch.setattr(backend, "_run", capture)
+    root, output = backend._prepare_checkout(instance, tmp_path / "repo")
+
+    assert root == tmp_path / "repo"
+    assert output == "ok\n" * 4
+    assert calls[2][0][-5:] == ["fetch", "--depth=1", "--no-tags", "origin", "abc123"]
+    assert "clone" not in [part for command, _ in calls for part in command]
+    assert calls[3][0][-3:] == ["checkout", "--detach", "FETCH_HEAD"]
 
 
 def test_apply_patch_accepts_lf_diff_for_lf_checkout_on_windows(tmp_path):

@@ -44,6 +44,25 @@ def test_container_command_enforces_security_and_resource_limits(tmp_path):
     assert "dst=/workspace" in command[command.index("--mount") + 1]
 
 
+def test_wsl_docker_converts_windows_bind_mount(tmp_path):
+    backend = DockerEvaluationBackend(["wsl.exe", "docker"])
+    command = backend.create_command(docker_instance(), Path("D:/Code/work"), "sdd-eval-test")
+
+    assert command[command.index("--mount") + 1] == "type=bind,src=/mnt/d/Code/work,dst=/workspace"
+
+
+def test_dependency_cache_uses_hashed_managed_volume(tmp_path):
+    instance = docker_instance().model_copy(update={
+        "docker": docker_instance().docker.model_copy(update={"dependency_cache_key": "maven-demo"}),
+    })
+
+    command = DockerEvaluationBackend().create_command(instance, tmp_path, "sdd-eval-test")
+    mounts = [command[index + 1] for index, value in enumerate(command) if value == "--mount"]
+
+    assert any(value.startswith("type=volume,source=sdd-eval-cache-") and value.endswith(",target=/sdd-cache") for value in mounts)
+    assert all("maven-demo" not in value for value in mounts)
+
+
 def test_grading_network_is_disconnected_unless_explicitly_allowed(monkeypatch):
     backend = DockerEvaluationBackend()
     calls = []

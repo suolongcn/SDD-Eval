@@ -7,6 +7,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import subprocess
 import tempfile
 import uuid
 
@@ -23,13 +24,31 @@ class DockerEvaluationBackend(LocalEvaluationBackend):
 
     name = DOCKER_HARNESS_VERSION
 
-    def __init__(self, docker_executable: str = "docker"):
+    def __init__(self, docker_executable: str | list[str] = "docker"):
         self.docker_executable = docker_executable
         self._image_digests: dict[str, str] = {}
 
     def _docker(self, arguments: list[str], timeout: int = 600) -> CommandResult:
-        executable = shutil.which(self.docker_executable) or self.docker_executable
-        return self._run([executable, *arguments], Path.cwd(), timeout)
+        if isinstance(self.docker_executable, list):
+            command = [*self.docker_executable, *arguments]
+        else:
+            executable = shutil.which(self.docker_executable) or self.docker_executable
+            command = [executable, *arguments]
+        return self._run(command, Path.cwd(), timeout)
+
+    @classmethod
+    def for_host(cls) -> "DockerEvaluationBackend":
+        """Use native Docker, or the default WSL distribution on Windows."""
+        if shutil.which("docker") or shutil.which("docker.exe"):
+            return cls()
+        if shutil.which("wsl.exe"):
+            probe = subprocess.run(
+                ["wsl.exe", "sh", "-lc", "command -v docker >/dev/null && docker info >/dev/null 2>&1"],
+                capture_output=True, timeout=30,
+            )
+            if probe.returncode == 0:
+                return cls(["wsl.exe", "docker"])
+        return cls()
 
     def available(self) -> bool:
         return self._docker(["info", "--format", "{{.ServerVersion}}"], 20).passed
@@ -97,6 +116,10 @@ class DockerEvaluationBackend(LocalEvaluationBackend):
         if not spec.image:
             raise ValueError("docker.image is required")
         mount_source = str(checkout.resolve())
+        if isinstance(self.docker_executable, list) and self.docker_executable[:2] == ["wsl.exe", "docker"]:
+            drive, tail = Path(mount_source).drive.rstrip(":"), Path(mount_source).parts[1:]
+            if drive:
+                mount_source = "/mnt/" + drive.lower() + "/" + "/".join(tail)
         command = [
             "create", "--name", container_name,
             "--network", spec.setup_network,
@@ -110,6 +133,9 @@ class DockerEvaluationBackend(LocalEvaluationBackend):
             "--env", "XDG_CACHE_HOME=/tmp/cache",
             "--mount", f"type=bind,src={mount_source},dst=/workspace",
         ]
+        if spec.dependency_cache_key:
+            cache_id = hashlib.sha256(spec.dependency_cache_key.encode("utf-8")).hexdigest()[:16]
+            command.extend(["--mount", f"type=volume,source=sdd-eval-cache-{cache_id},target=/sdd-cache"])
         if spec.read_only_root:
             command.append("--read-only")
         if spec.platform:

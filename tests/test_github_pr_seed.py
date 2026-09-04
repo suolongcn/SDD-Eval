@@ -41,3 +41,16 @@ def test_seed_builds_separate_hidden_fail_and_pass_checks():
     assert pass_test == ".sdd_eval_tests/pr_123_pass.py"
     assert "official merged behavior" in test_patch
     assert test_patch.count("diff --git") == 2
+
+
+def test_known_behavioral_oracles_do_not_require_reference_source_markers():
+    flask = next(task for task in TASKS if task["repo"] == "pallets/flask" and task["pr"] == 5928)
+    petclinic = next(task for task in TASKS if task["repo"] == "spring-projects/spring-petclinic" and task["pr"] == 2611)
+
+    flask_patch, flask_fail, flask_pass, _ = oracle_test_patch(flask, "unused")
+    pet_patch, pet_fail, pet_pass, _ = oracle_test_patch(petclinic, "unused")
+
+    assert "official PR marker" not in flask_patch + pet_patch
+    assert "test_all_teardown_callbacks_and_signals_run" in flask_fail[0]
+    assert set(pet_fail) == {"Pr2611OracleTests#addsPersistedPet", "Pr2611OracleTests#rejectsPetNameLongerThanThirtyCharacters"}
+    assert flask_pass and pet_pass

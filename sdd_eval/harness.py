@@ -11,7 +11,9 @@ from dataclasses import dataclass, field
 import fnmatch
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 from typing import Sequence
@@ -73,9 +75,24 @@ class LocalEvaluationBackend:
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
     def _run(self, command: Sequence[str], cwd: Path, timeout: int) -> CommandResult:
+        command = list(command)
+        # Dataset commands may name the cache mounted by the Docker backend.
+        # On a Windows local run that path becomes a single shared C:\sdd-cache
+        # directory, where concurrent Maven writers fail on `.lastUpdated`
+        # files. Give every isolated checkout its own repository instead.
+        if os.name == "nt":
+            local_m2 = (cwd / ".sdd_eval_m2").resolve()
+            command = [
+                argument.replace("-Dmaven.repo.local=/sdd-cache/m2", f"-Dmaven.repo.local={local_m2}")
+                for argument in command
+            ]
+        if command and command[0] == "mvn" and shutil.which("mvn") is None:
+            wrapper = cwd / ("mvnw.cmd" if os.name == "nt" else "mvnw")
+            if wrapper.is_file():
+                command[0] = str(wrapper)
         try:
             process = subprocess.run(
-                list(command), cwd=cwd, capture_output=True, text=True,
+                command, cwd=cwd, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=timeout,
             )
             output = (process.stdout or "") + (process.stderr or "")
@@ -88,13 +105,26 @@ class LocalEvaluationBackend:
             return CommandResult(False, 127, str(error))
 
     def _prepare_checkout(self, instance: BenchmarkInstance, destination: Path) -> tuple[Path | None, str]:
-        clone = self._run(["git", "clone", "--no-hardlinks", instance.repo, str(destination)], destination.parent, 600)
-        if not clone.passed:
-            return None, clone.output
-        checkout = self._run(["git", "checkout", "--detach", instance.base_commit], destination, 180)
-        if not checkout.passed:
-            return None, checkout.output
-        return destination, clone.output + checkout.output
+        """Fetch only the requested base commit instead of cloning full history.
+
+        Large benchmark monorepos can contain years of history. A full clone for
+        every concurrent job needlessly saturates the proxy, disk, and checkout
+        workers. Fetching the immutable benchmark commit at depth one preserves
+        evaluation semantics while making acquisition bounded and repeatable.
+        """
+        commands = [
+            (["git", "init", str(destination)], destination.parent, 60),
+            (["git", "-C", str(destination), "remote", "add", "origin", instance.repo], destination.parent, 30),
+            (["git", "-C", str(destination), "-c", "protocol.version=2", "fetch", "--depth=1", "--no-tags", "origin", instance.base_commit], destination.parent, 600),
+            (["git", "-C", str(destination), "-c", "advice.detachedHead=false", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.required=false", "checkout", "--detach", "FETCH_HEAD"], destination.parent, 300),
+        ]
+        output = []
+        for command, cwd, timeout in commands:
+            result = self._run(command, cwd, timeout)
+            output.append(result.output)
+            if not result.passed:
+                return None, "".join(output)
+        return destination, "".join(output)
 
     def _apply_patch(self, root: Path, patch: str, label: str) -> CommandResult:
         if not patch.strip():

@@ -29,7 +29,7 @@ def comparison_report(output: str | None = None, instance_ids: str | None = None
 
 def backend_for(name: str):
     if name == "local": return LocalEvaluationBackend()
-    if name == "docker": return DockerEvaluationBackend()
+    if name == "docker": return DockerEvaluationBackend.for_host()
     raise typer.BadParameter("backend must be local or docker")
 
 

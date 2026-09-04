@@ -83,6 +83,7 @@ class DockerSpec(BaseModel):
     read_only_root: bool = True
     user: str | None = None
     pull: bool = False
+    dependency_cache_key: str | None = Field(default=None, min_length=1, max_length=120)
     limits: ContainerLimits = Field(default_factory=ContainerLimits)
 
 

@@ -10,8 +10,15 @@ def build_comparison_report(predictions: list[Prediction], results: list[Evaluat
     selected_instances = set(instance_ids or [p.instance_id for p in filtered_predictions])
     selected_models = set(models or [p.model_name_or_path for p in filtered_predictions])
     pmap = {p.prediction_id: p for p in filtered_predictions}
-    groups: dict[str, list[EvaluationResult]] = defaultdict(list)
+    # A retry/re-evaluation can leave an older result for the same prediction;
+    # reports must reflect the latest authoritative evaluation only.
+    latest_results: dict[str, EvaluationResult] = {}
     for result in results:
+        previous = latest_results.get(result.prediction_id)
+        if previous is None or result.created_at > previous.created_at:
+            latest_results[result.prediction_id] = result
+    groups: dict[str, list[EvaluationResult]] = defaultdict(list)
+    for result in latest_results.values():
         prediction = pmap.get(result.prediction_id)
         if prediction and prediction.instance_id in selected_instances and prediction.model_name_or_path in selected_models:
             groups[prediction.model_name_or_path].append(result)

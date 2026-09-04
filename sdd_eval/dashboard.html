@@ -24,7 +24,7 @@
     <button class="tab active" data-view="overview">概览</button><button class="tab" data-view="instances">测试实例</button><button class="tab" data-view="predictions">预测结果</button><button class="tab" data-view="jobs">任务</button><button class="tab" data-view="results">评测结果</button><button class="tab" data-view="comparison">模型对比</button><button class="tab" data-view="validations">实例校验</button>
   </nav>
   <section id="overview" class="view active"><div class="grid" id="summary"></div><div class="panel"><h2>最近评测结果</h2><div id="recentResults"></div></div><div class="panel"><h2>执行协议</h2><p class="muted">所有任务均使用 V2 数据契约。公开 Instance 与私有 Oracle 分离；模型提交 Prediction 后由独立 Worker 在 Local 或 Docker Backend 中执行，最终以目标测试和回归测试共同判定。</p></div></section>
-  <section id="instances" class="view"><div class="panel"><h2>基准测试实例</h2><div class="toolbar"><input id="datasetFilter" placeholder="数据集编号"><select id="splitFilter"><option value="">全部数据分组</option><option>train</option><option>dev</option><option>test</option><option>verified</option><option>private</option></select><button class="action secondary" onclick="loadInstances()">筛选</button><button class="action" onclick="openInstanceForm()">新建公开实例</button></div><div id="instanceTable"></div></div></section>
+  <section id="instances" class="view"><div class="panel"><h2>基准测试实例</h2><p class="muted">FAIL_TO_PASS（目标测试）和 PASS_TO_PASS（回归测试）在导入数据集时写入私有评测标准。为避免泄露隐藏测试，页面仅展示最近一次执行的通过数/总数，不展示具体测试选择器。</p><div class="toolbar"><input id="datasetFilter" placeholder="数据集编号"><select id="splitFilter"><option value="">全部数据分组</option><option>train</option><option>dev</option><option>test</option><option>verified</option><option>private</option></select><button class="action secondary" onclick="loadInstances()">筛选</button><button class="action" onclick="openInstanceForm()">新建公开实例</button></div><div id="instanceTable"></div></div><div class="panel"><h2>从 GitHub / GitCode 补充测试用例</h2><p class="muted">先按平台、编程语言和项目名称（模糊匹配）查找项目，再按 PR 代码变更行数筛选已合并 PR。导入后会创建带私有可执行 Oracle 的测试实例。</p><div class="toolbar"><select id="sourceForge"><option value="github">GitHub</option><option value="gitcode">GitCode</option></select><input id="sourceLanguage" placeholder="编程语言，如 Python"><input id="sourceProject" placeholder="项目名称（模糊查询）"><button class="action" onclick="searchSourceRepositories()">查询项目</button></div><div id="sourceRepositoryResults"></div><div id="sourcePullResults"></div></div></section>
   <section id="predictions" class="view"><div class="panel"><h2>预测结果</h2><div class="toolbar"><select id="predictionInstanceFilter"><option value="">全部实例</option></select><button class="action" onclick="openGenerationForm()">生成并评测</button><button class="action secondary" onclick="openPredictionForm()">导入已有预测结果</button></div><div id="predictionTable"></div></div></section>
   <section id="jobs" class="view"><div class="panel"><h2>持久化任务</h2><div class="toolbar"><select id="jobStatus"><option value="">全部状态</option><option value="queued">排队中</option><option value="preparing">准备中</option><option value="generating">生成中</option><option value="evaluating">评测中</option><option value="completed">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select><button class="action" onclick="openJobForm()">创建任务</button><button class="action secondary" onclick="loadJobs()">刷新</button></div><div id="jobTable"></div></div></section>
   <section id="results" class="view"><div class="panel"><h2>评测结果</h2><div id="resultTable"></div></div></section>
@@ -190,11 +190,11 @@
   refresh(); setInterval(() => Promise.all([loadSummary(), loadJobs(), loadBatches(), loadReport()]).catch(console.error), 3000);
 })();
 </script>
-<script>
+<script type="text/plain" id="obsolete-dashboard-script">
 (() => {
   const $ = selector => document.querySelector(selector);
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
-  const state = {instances: [], jobs: [], batches: [], report: null, selectedBatch: ""};
+  const state = {instances: [], instanceTestSummaries: {}, jobs: [], batches: [], report: null, selectedBatch: ""};
   const api = async (path, options) => {
     const response = await fetch(path, options);
     const type = response.headers.get("content-type") || "";
@@ -232,10 +232,12 @@
     const query = new URLSearchParams();
     if ($("#datasetFilter")?.value) query.set("dataset_id", $("#datasetFilter").value);
     if ($("#splitFilter")?.value) query.set("split", $("#splitFilter").value);
-    state.instances = await api("/api/instances" + (query.toString() ? "?" + query : ""));
+    const [instanceRows, testSummaries] = await Promise.all([api("/api/instances" + (query.toString() ? "?" + query : "")), api("/api/instance-test-summaries")]);
+    state.instances = instanceRows;
+    state.instanceTestSummaries = Object.fromEntries(testSummaries.map(item => [item.instance_id, item]));
     const filter = $("#predictionInstanceFilter");
     if (filter) filter.innerHTML = '<option value="">全部实例</option>' + state.instances.map(item => `<option value="${esc(item.instance_id)}">${esc(item.instance_id)}</option>`).join("");
-    $("#instanceTable").innerHTML = state.instances.length ? `<table><thead><tr><th>实例</th><th>数据集</th><th>代码仓库</th><th>问题描述</th><th>需求数量</th></tr></thead><tbody>${state.instances.map(item => `<tr><td><b>${esc(item.instance_id)}</b><br>${badge(item.split)}</td><td>${esc(item.dataset_id)}</td><td>${esc(item.repo)}<br><span class="mono">${esc((item.base_commit || "").slice(0, 12))}</span></td><td class="problem">${esc(item.problem_statement)}</td><td>${item.requirements?.length || 0}</td></tr>`).join("")}</tbody></table>` : empty("暂无基准测试实例");
+    $("#instanceTable").innerHTML = state.instances.length ? `<table><thead><tr><th>实例</th><th>数据集</th><th>代码仓库</th><th>问题描述</th><th>需求数量</th><th>目标测试<br><span class="muted">FAIL_TO_PASS</span></th><th>回归测试<br><span class="muted">PASS_TO_PASS</span></th><th>实例校验</th><th>评测次数</th></tr></thead><tbody>${state.instances.map(item => { const summary=state.instanceTestSummaries[item.instance_id]||{},f2p=summary.fail_to_pass,p2p=summary.pass_to_pass,validation=summary.validation; return `<tr><td><b>${esc(item.instance_id)}</b><br>${badge(item.split)}</td><td>${esc(item.dataset_id)}</td><td>${esc(item.repo)}<br><span class="mono">${esc((item.base_commit || "").slice(0, 12))}</span></td><td class="problem">${esc(item.problem_statement)}</td><td>${item.requirements?.length || 0}</td><td>${f2p?`${f2p.passed} / ${f2p.total}`:'<span class="muted">尚未执行</span>'}</td><td>${p2p?`${p2p.passed} / ${p2p.total}`:'<span class="muted">尚未执行</span>'}</td><td>${validation?badge(validation.valid?'有效':'无效'):'<span class="muted">尚未校验</span>'}</td><td>${summary.evaluation_count||0}</td></tr>`; }).join("")}</tbody></table>` : empty("暂无基准测试实例");
   }
   async function loadJobs() {
     state.jobs = await api("/api/jobs");
@@ -281,10 +283,38 @@
   window.submitComparison = async () => { const instance_ids = [...document.querySelectorAll('[name="comparisonInstance"]:checked')].map(item => item.value); const models = [...document.querySelectorAll('[name="comparisonModel"]:checked')].map(item => item.value); if (!instance_ids.length || !models.length) return alert("至少选择一个测试实例和一个模型"); try { const response = await api("/api/comparisons", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({instance_ids, models, client: $("#comparisonClient").value, workflow: $("#comparisonWorkflow").value, backend: $("#comparisonBackend").value, max_attempts: Number($("#comparisonAttempts").value)})}); state.selectedBatch = response.batch_id; closeModal(); await refresh(); document.querySelector('[data-view="comparison"]').click(); window.showJson("批量评测已创建", response); } catch (error) { alert(error.message); } };
   async function loadSummary() { const summary = await api("/api/summary"); $("#summary").innerHTML = [["测试实例", summary.instances], ["预测结果", summary.predictions], ["进行中任务", summary.active_jobs], ["评测结果", summary.results], ["解决率", summary.resolve_rate + "%"]].map(item => `<div class="card"><div class="label">${item[0]}</div><div class="number">${item[1]}</div></div>`).join(""); }
   async function refresh() { await loadInstances(); await Promise.all([loadSummary(), loadPredictions(), loadJobs(), loadResults(), loadValidations(), loadBatches(), loadReport()]); $("#recentResults").innerHTML = $("#resultTable").innerHTML; }
+  window.searchSourceRepositories = async () => {
+    const forge = $("#sourceForge").value, name = $("#sourceProject").value.trim(), language = $("#sourceLanguage").value.trim();
+    const target = $("#sourceRepositoryResults"); target.innerHTML = '<div class="empty">正在查询项目...</div>'; $("#sourcePullResults").innerHTML = "";
+    try {
+      const query = new URLSearchParams({forge, name, language});
+      const rows = await api("/api/pr-sources/repositories?" + query);
+      target.innerHTML = rows.length ? `<table><thead><tr><th>项目</th><th>语言</th><th>Stars</th><th>说明</th><th></th></tr></thead><tbody>${rows.map(item => `<tr><td><a class="source-link" href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.full_name)}</a></td><td>${esc(item.language || "-")}</td><td>${item.stars}</td><td class="problem">${esc(item.description || "-")}</td><td><button class="action secondary" onclick="loadSourcePulls(decodeURIComponent('${encodeURIComponent(item.full_name)}'))">查看 PR</button></td></tr>`).join("")}</tbody></table>` : empty("没有找到匹配的项目");
+    } catch (error) { target.innerHTML = empty(error.message); }
+  };
+  window.loadSourcePulls = async repository => {
+    const forge = $("#sourceForge").value, target = $("#sourcePullResults");
+    const selectedSize = $("#sourceSize")?.value || "all";
+    target.innerHTML = `<div class="toolbar"><b>${esc(repository)}</b><select id="sourceSize"><option value="all">全部代码量</option><option value="under_500">500 行以下</option><option value="500_to_1500">500–1500 行</option><option value="over_1500">1500 行以上</option></select><button class="action secondary" onclick="loadSourcePulls(decodeURIComponent('${encodeURIComponent(repository)}'))">应用筛选</button></div><div class="empty">正在查询已合并 PR...</div>`;
+    $("#sourceSize").value = selectedSize;
+    try {
+      const query = new URLSearchParams({forge, repository, size:selectedSize});
+      const rows = await api("/api/pr-sources/pulls?" + query);
+      target.lastElementChild.outerHTML = rows.length ? `<table><thead><tr><th>PR</th><th>标题</th><th>代码变更</th><th>合并时间</th><th></th></tr></thead><tbody>${rows.map(item => `<tr><td><a class="source-link" href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">#${item.number}</a></td><td class="problem">${esc(item.title)}</td><td>${item.changed_lines} 行<br><span class="muted">+${item.additions} / -${item.deletions}</span></td><td>${esc(item.merged_at || "-")}</td><td><button class="action" onclick="importSourcePull(this,'${item.number}',decodeURIComponent('${encodeURIComponent(repository)}'))">补充为测试用例</button></td></tr>`).join("")}</tbody></table>` : empty("该代码量范围内没有已合并 PR");
+    } catch (error) { target.lastElementChild.outerHTML = empty(error.message); }
+  };
+  window.importSourcePull = async (button, number, repository) => {
+    button.disabled = true;
+    try {
+      const instance = await api("/api/pr-sources/import", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({forge:$("#sourceForge").value, repository, number:Number(number), language:$("#sourceLanguage").value.trim()})});
+      await loadInstances(); alert(`已补充测试用例：${instance.instance_id}`);
+    } catch (error) { alert("导入失败：" + error.message); button.disabled = false; }
+  };
   Object.assign(window, {loadInstances, loadPredictions, loadResults, loadValidations, loadJobs, loadBatches, loadReport, loadSummary, refresh});
   $("#predictionInstanceFilter")?.addEventListener("change", () => loadPredictions().catch(console.error));
   $("#jobStatus")?.addEventListener("change", () => loadJobs().catch(console.error));
   refresh().catch(console.error); setInterval(() => Promise.all([loadSummary(), loadJobs(), loadResults(), loadValidations(), loadBatches(), loadReport()]).catch(console.error), 3000);
 })();
 </script>
+<script src="/dashboard.js"></script>
 </body></html>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import fnmatch
 import shutil
 import subprocess
 import tempfile
@@ -39,19 +40,17 @@ class AgentGenerator:
             raise AgentGenerationError(str(error)) from error
 
     def _checkout(self, instance: BenchmarkInstance, destination: Path) -> Path:
-        clone_command = [self._command("git"), "clone", "--no-hardlinks"]
-        if instance.repo.startswith(("http://", "https://")):
-            # GitHub-sized repositories are more reliable through the proxy when
-            # blobs and tags are fetched lazily; checkout below still materializes
-            # the requested base commit.
-            clone_command.extend(["--filter=blob:none", "--no-tags", "--no-checkout"])
-        clone_command.extend([instance.repo, str(destination)])
-        clone = self._run(clone_command, destination.parent, 600)
-        if clone.returncode:
-            raise AgentGenerationError(f"repository clone failed: {(clone.stdout + clone.stderr)[-2000:]}")
-        checkout = self._run([self._command("git"), "checkout", "--detach", instance.base_commit], destination, 180)
-        if checkout.returncode:
-            raise AgentGenerationError(f"base commit checkout failed: {(checkout.stdout + checkout.stderr)[-2000:]}")
+        git = self._command("git")
+        commands = [
+            ([git, "init", str(destination)], destination.parent, 60, "repository initialization"),
+            ([git, "-C", str(destination), "remote", "add", "origin", instance.repo], destination.parent, 30, "remote configuration"),
+            ([git, "-C", str(destination), "-c", "protocol.version=2", "fetch", "--depth=1", "--no-tags", "origin", instance.base_commit], destination.parent, 600, "base commit fetch"),
+            ([git, "-C", str(destination), "-c", "advice.detachedHead=false", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.required=false", "checkout", "--detach", "FETCH_HEAD"], destination.parent, 300, "base commit checkout"),
+        ]
+        for command, cwd, timeout, label in commands:
+            result = self._run(command, cwd, timeout)
+            if result.returncode:
+                raise AgentGenerationError(f"{label} failed: {(result.stdout + result.stderr)[-2000:]}")
         return destination.resolve()
 
     @staticmethod
@@ -119,13 +118,49 @@ Inspect the repository before editing. Make the smallest production-quality chan
             return [
                 self._command("codex"), "--profile", "relay", "exec", "--cd", str(root),
                 "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
-                "--model", model, prompt,
+                "--json", "--model", model, prompt,
             ]
         model = self._opencode_model(model)
         return [
             self._command("opencode"), "run", "--dir", str(root),
             "--format", "json", "--auto", "--model", model, prompt,
         ]
+
+    @staticmethod
+    def _token_usage(client: str, model: str, output: str, latency_ms: int) -> TokenUsage:
+        """Extract usage from Codex/OpenCode JSONL without counting display events twice."""
+        input_tokens = output_tokens = 0
+        parsed = False
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if client == "opencode" and event.get("type") == "step_finish":
+                tokens = (event.get("part") or {}).get("tokens") or {}
+                cache = tokens.get("cache") or {}
+                input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0) + int(cache.get("write") or 0)
+                output_tokens += int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
+                parsed = True
+            elif client == "codex" and event.get("type") == "turn.completed":
+                usage = event.get("usage") or {}
+                # Codex reports aggregate usage for the completed turn. Keep the
+                # cached portion inside input_tokens because it is consumed input.
+                input_tokens += int(usage.get("input_tokens") or 0)
+                output_tokens += int(usage.get("output_tokens") or 0)
+                parsed = True
+        if not parsed and client == "codex":
+            # Compatibility with older non-JSON Codex output. It exposes only a
+            # total, so retain it as estimated input rather than losing usage.
+            matches = re.findall(r"(?im)^tokens used\s*\r?\n\s*([\d,]+)\s*$", output)
+            if matches:
+                input_tokens = int(matches[-1].replace(",", ""))
+                parsed = True
+        return TokenUsage(
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            provider=f"{client}:{model}", mode="model" if output_tokens else "total-only",
+            estimated=not parsed or (client == "codex" and output_tokens == 0), latency_ms=latency_ms,
+        )
 
     @staticmethod
     def _opencode_model(model: str) -> str:
@@ -223,7 +258,7 @@ Inspect the repository before editing. Make the smallest production-quality chan
         return patch
 
     @staticmethod
-    def _excluded_patch_path(path: str) -> bool:
+    def _excluded_patch_path(path: str, forbidden_paths: list[str] | None = None) -> bool:
         """Keep generated predictions focused on production source files.
 
         Git pathspec exclusions are version/configuration sensitive, so apply
@@ -238,10 +273,12 @@ Inspect the repository before editing. Make the smallest production-quality chan
         lowered = normalized.lower()
         if any(part in {".codex", ".opencode", "openspec", "codespec", "superpowers", ".sdd_eval_tests"} for part in parts):
             return True
+        if any(fnmatch.fnmatch(normalized, pattern) for pattern in (forbidden_paths or [])):
+            return True
         return False
 
     @classmethod
-    def _filter_patch(cls, patch: str, scope: str = ".") -> str:
+    def _filter_patch(cls, patch: str, scope: str = ".", forbidden_paths: list[str] | None = None) -> str:
         """Remove excluded files while preserving complete unified-diff sections."""
         sections = re.split(r"(?=^diff --git )", patch, flags=re.MULTILINE)
         kept: list[str] = []
@@ -250,7 +287,7 @@ Inspect the repository before editing. Make the smallest production-quality chan
                 continue
             header = next((line for line in section.splitlines() if line.startswith("diff --git ")), "")
             match = re.match(r"diff --git a/(.+) b/(.+)$", header)
-            if match and not cls._excluded_patch_path(match.group(2)):
+            if match and not cls._excluded_patch_path(match.group(2), forbidden_paths):
                 kept.append(section)
         return "".join(kept)
 
@@ -259,7 +296,13 @@ Inspect the repository before editing. Make the smallest production-quality chan
         if parent:
             parent.mkdir(parents=True, exist_ok=True)
         started = time.perf_counter()
-        with tempfile.TemporaryDirectory(prefix="sdd-agent-", dir=parent) as temporary:
+        # OpenCode may leave a short-lived child process holding a repository
+        # file on Windows after it has returned.  Cleanup must not turn an
+        # otherwise valid prediction into a generation failure; the OS will
+        # release the handle and the directory can be removed later.
+        with tempfile.TemporaryDirectory(
+            prefix="sdd-agent-", dir=parent, ignore_cleanup_errors=True,
+        ) as temporary:
             root = self._checkout(instance, Path(temporary) / "repo")
             agent_root = (root / instance.environment.working_directory).resolve()
             if agent_root != root.resolve() and root.resolve() not in agent_root.parents:
@@ -278,7 +321,10 @@ Inspect the repository before editing. Make the smallest production-quality chan
                 result = self._run(
                     self._agent_command(agent_root, client, model, prompt),
                     agent_root,
-                    timeout=3600,
+                    # Large repositories can spend over an hour in agent
+                    # inspection and verification; keep the worker lease
+                    # independent so heartbeats continue during the run.
+                    timeout=7200,
                 )
             finally:
                 self._restore_opencode_config(config_state)
@@ -298,8 +344,7 @@ Inspect the repository before editing. Make the smallest production-quality chan
                 documents=documents,
                 logs={"workflow": "\n".join(workflow_logs)[-8000:], "agent": output[-12000:]},
             ),
-            token_usage=TokenUsage(
-                provider=f"{client}:{model}", mode="model", estimated=True,
-                latency_ms=int((time.perf_counter() - started) * 1000),
+            token_usage=self._token_usage(
+                client, model, output, int((time.perf_counter() - started) * 1000),
             ),
         )

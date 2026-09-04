@@ -25,8 +25,34 @@ def test_agent_commands_preserve_client_and_model_selection(tmp_path):
     assert "codex" in codex[0] and codex[codex.index("--model") + 1] == "gpt-5.6-sol"
     assert codex[1:3] == ["--profile", "relay"]
     assert "--dangerously-bypass-approvals-and-sandbox" in codex
+    assert "--json" in codex
     assert "--approve-for-me" not in codex and "--sandbox" not in codex
     assert "opencode" in opencode[0] and opencode[opencode.index("--model") + 1] == "gpt-5.6-luna"
+
+
+def test_opencode_jsonl_token_usage_includes_cache_and_reasoning():
+    output = "\n".join([
+        '{"type":"step_finish","part":{"tokens":{"input":100,"output":20,"reasoning":5,"cache":{"read":300,"write":10}}}}',
+        '{"type":"step_finish","part":{"tokens":{"input":50,"output":10,"reasoning":2,"cache":{"read":100,"write":0}}}}',
+    ])
+
+    usage = AgentGenerator._token_usage("opencode", "gateway/model", output, 123)
+
+    assert usage.input_tokens == 560
+    assert usage.output_tokens == 37
+    assert not usage.estimated and usage.latency_ms == 123
+
+
+def test_codex_jsonl_and_legacy_total_token_usage():
+    json_usage = AgentGenerator._token_usage(
+        "codex", "model",
+        '{"type":"turn.completed","usage":{"input_tokens":1234,"cached_input_tokens":1000,"output_tokens":56}}', 10,
+    )
+    legacy_usage = AgentGenerator._token_usage("codex", "model", "done\n\ntokens used\n25,149\n", 20)
+
+    assert (json_usage.input_tokens, json_usage.output_tokens, json_usage.estimated) == (1234, 56, False)
+    assert (legacy_usage.input_tokens, legacy_usage.output_tokens) == (25149, 0)
+    assert legacy_usage.estimated and legacy_usage.mode == "total-only"
 
 
 def test_opencode_model_aliases_are_provider_qualified(tmp_path):
@@ -136,3 +162,24 @@ def test_patch_filter_keeps_repository_owned_tests():
 """
 
     assert AgentGenerator._filter_patch(patch) == patch
+
+
+def test_patch_filter_removes_oracle_forbidden_paths_only_when_supplied():
+    patch = """diff --git a/src/main.py b/src/main.py
+--- a/src/main.py
++++ b/src/main.py
+@@ -1 +1 @@
+-old
++new
+diff --git a/tests/test_public.py b/tests/test_public.py
+--- a/tests/test_public.py
++++ b/tests/test_public.py
+@@ -1 +1 @@
+-old
++new
+"""
+
+    filtered = AgentGenerator._filter_patch(patch, forbidden_paths=["tests/**"])
+
+    assert "src/main.py" in filtered
+    assert "tests/test_public.py" not in filtered

@@ -193,6 +193,9 @@ def added_file_patch(path: str, content: str) -> str:
 
 
 def oracle_test_patch(task: dict, patch: str) -> tuple[str, str, str, str]:
+    functional = functional_oracle(task)
+    if functional:
+        return functional
     target_path, marker = smoke_anchor(patch)
     slug = f"pr_{task['pr']}"
     fail_path = f".sdd_eval_tests/{slug}_fail.py"
@@ -217,6 +220,165 @@ def oracle_test_patch(task: dict, patch: str) -> tuple[str, str, str, str]:
     )
 
 
+def functional_oracle(task: dict) -> tuple[str, list[str], list[str], str] | None:
+    """Behavioral Oracles for benchmark cases where exact-source anchors are unsound."""
+    key = (task.get("repo"), task["pr"])
+    if key == ("pallets/flask", 5928):
+        path = ".sdd_eval_tests/test_pr_5928.py"
+        runner_path = ".sdd_eval_tests/run_pytest.py"
+        content = '''import sys
+
+import flask
+import pytest
+
+
+def test_all_teardown_callbacks_and_signals_run():
+    app = flask.Flask(__name__)
+    count = 0
+
+    @app.teardown_request
+    def request_teardown(error):
+        nonlocal count
+        count += 1
+        raise ValueError("request_teardown")
+
+    @app.teardown_appcontext
+    def app_teardown(error):
+        nonlocal count
+        count += 1
+        raise ValueError("app_teardown")
+
+    @app.get("/")
+    def index():
+        return "ok"
+
+    def request_signal(sender, exc):
+        nonlocal count
+        count += 1
+        raise ValueError("request_signal")
+
+    def app_signal(sender, exc):
+        nonlocal count
+        count += 1
+        raise ValueError("app_signal")
+
+    with flask.request_tearing_down.connected_to(request_signal, app), flask.appcontext_tearing_down.connected_to(app_signal, app):
+        expected = ExceptionGroup if sys.version_info >= (3, 11) else ValueError
+        with pytest.raises(expected):
+            app.test_client().get("/")
+
+    assert count == 4
+
+
+def test_ordinary_request_is_unchanged():
+    app = flask.Flask(__name__)
+
+    @app.get("/")
+    def index():
+        return "ok"
+
+    response = app.test_client().get("/")
+    assert response.status_code == 200
+    assert response.data == b"ok"
+'''
+        runner = '''import sys
+sys.path.insert(0, ".sdd_eval_packages")
+import pytest
+raise SystemExit(pytest.main(sys.argv[1:]))
+'''
+        return added_file_patch(path, content) + added_file_patch(runner_path, runner), [f"{path}::test_all_teardown_callbacks_and_signals_run"], [f"{path}::test_ordinary_request_is_unchanged"], "src/flask/app.py"
+    if key == ("spring-projects/spring-petclinic", 2611):
+        path = "src/test/java/org/springframework/samples/petclinic/owner/Pr2611OracleTests.java"
+        content = '''/*
+ * Copyright 2012-2025 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.springframework.samples.petclinic.owner;
+
+import java.time.LocalDate;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.validation.BeanPropertyBindingResult;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class Pr2611OracleTests {
+
+	@Test
+	void addsPersistedPet() {
+		Owner owner = new Owner();
+		Pet pet = new Pet();
+		pet.setId(5);
+		pet.setName("Buddy");
+		owner.addPet(pet);
+		assertTrue(owner.getPets().contains(pet));
+	}
+
+	@Test
+	void rejectsPetNameLongerThanThirtyCharacters() {
+		Pet pet = new Pet();
+		pet.setName("A".repeat(31));
+		pet.setBirthDate(LocalDate.now());
+		PetType type = new PetType();
+		type.setName("dog");
+		pet.setType(type);
+		BeanPropertyBindingResult errors = new BeanPropertyBindingResult(pet, "pet");
+		new PetValidator().validate(pet, errors);
+		assertTrue(errors.hasFieldErrors("name"));
+	}
+
+	@Test
+	void stillAddsOrdinaryNewPet() {
+		Owner owner = new Owner();
+		Pet pet = new Pet();
+		pet.setName("Buddy");
+		owner.addPet(pet);
+		assertEquals(1, owner.getPets().size());
+	}
+
+}
+'''
+        return added_file_patch(path, content), ["Pr2611OracleTests#addsPersistedPet", "Pr2611OracleTests#rejectsPetNameLongerThanThirtyCharacters"], ["Pr2611OracleTests#stillAddsOrdinaryNewPet"], "src/main/java/org/springframework/samples/petclinic/owner/Owner.java"
+    return None
+
+
+def environment_for_task(task: dict) -> tuple[EnvironmentSpec, str, bool]:
+    key = (task.get("repo"), task["pr"])
+    if key == ("pallets/flask", 5928):
+        return EnvironmentSpec(
+            setup_commands=[["python", "-m", "pip", "install", "--cache-dir", "/sdd-cache/pip", "--target", ".sdd_eval_packages", ".", "pytest"]],
+            test_command=["python", ".sdd_eval_tests/run_pytest.py", "-q", "{tests}"],
+            working_directory=".", test_timeout_seconds=300,
+        ), "python:3.12-slim", False
+    if key == ("spring-projects/spring-petclinic", 2611):
+        return EnvironmentSpec(
+            setup_commands=[
+                ["mvn", "-q", "-Dmaven.repo.local=/sdd-cache/m2", "-DskipTests", "dependency:go-offline"],
+                ["mvn", "-q", "-Dmaven.repo.local=/sdd-cache/m2", "dependency:get", "-Dartifact=org.apache.maven.surefire:surefire-junit-platform:3.5.6"],
+                ["mvn", "-q", "-Dmaven.repo.local=/sdd-cache/m2", "dependency:get", "-Dartifact=org.junit.platform:junit-platform-launcher:6.0.3"],
+            ],
+            build_command=["mvn", "-q", "-Dmaven.repo.local=/sdd-cache/m2", "-DskipTests", "compile"],
+            test_command=["mvn", "-q", "-Dmaven.repo.local=/sdd-cache/m2", "-Dtest={tests}", "test"],
+            working_directory=".", setup_timeout_seconds=1200,
+            build_timeout_seconds=900, test_timeout_seconds=600,
+        ), "docker.1ms.run/library/maven:3.9-eclipse-temurin-21", True
+    return EnvironmentSpec(
+        test_command=["python", "{tests}"], working_directory=".", test_timeout_seconds=120,
+    ), "python:3.12-slim", False
+
+
 def main() -> None:
     store = Store(str(WORKSPACE / "sdd_eval.db"))
     for task in TASKS:
@@ -238,6 +400,7 @@ def main() -> None:
             source_refs=[value for value in (issue_url, pr_url) if value],
             oracle_refs=[target_path],
         )
+        environment, docker_image, docker_pull = environment_for_task(task)
         instance = BenchmarkInstance(
             instance_id=instance_id,
             dataset_id=DATASET_ID,
@@ -247,11 +410,16 @@ def main() -> None:
             base_commit=task["base_commit"],
             problem_statement=task["problem"],
             language=task["language"],
-            environment=EnvironmentSpec(
-                test_command=["python", "{tests}"],
-                working_directory=".",
-                test_timeout_seconds=120,
-            ),
+            environment=environment,
+            docker={
+                "image": docker_image,
+                "pull": docker_pull,
+                "dependency_cache_key": (
+                    "maven-spring-petclinic" if (repo, pr) == ("spring-projects/spring-petclinic", 2611)
+                    else "pip-flask" if (repo, pr) == ("pallets/flask", 5928)
+                    else None
+                ),
+            },
             requirements=[requirement],
             constraints=["Preserve behavior outside the merged PR scope", "Do not modify hidden Oracle tests"],
             source_issue_url=issue_url,
@@ -264,8 +432,8 @@ def main() -> None:
             instance_id=instance_id,
             gold_patch=patch,
             test_patch=test_patch,
-            fail_to_pass=[fail_test],
-            pass_to_pass=[pass_test],
+            fail_to_pass=fail_test if isinstance(fail_test, list) else [fail_test],
+            pass_to_pass=pass_test if isinstance(pass_test, list) else [pass_test],
             forbidden_paths=[".sdd_eval_tests/**"],
             reference_commit=task["reference_commit"],
             quality_review={
