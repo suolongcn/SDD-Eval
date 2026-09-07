@@ -27,10 +27,12 @@ def test_html_report_orders_models_by_average_score_descending():
     rows = [
         {"model": "low", "runs": 1, "resolved": 0, "resolve_rate": 0,
          "average_score": 20, "functional_score": 0, "code_quality_score": 0,
-         "documentation_score": 0, "avg_latency_ms": 60000},
+         "documentation_score": 0, "avg_latency_ms": 60000,
+         "total_input_tokens": 999, "total_output_tokens": 1000, "total_tokens": 1000000},
         {"model": "high", "runs": 1, "resolved": 1, "resolve_rate": 1,
          "average_score": 90, "functional_score": 100, "code_quality_score": 80,
-         "documentation_score": 70, "avg_latency_ms": 90000},
+         "documentation_score": 70, "avg_latency_ms": 90000,
+         "total_input_tokens": 2500, "total_output_tokens": 1250000, "total_tokens": 1252500},
     ]
 
     rendered = api._comparison_report_html("batch", {
@@ -39,6 +41,8 @@ def test_html_report_orders_models_by_average_score_descending():
     })
 
     assert rendered.index("<b>high</b>") < rendered.index("<b>low</b>")
+    assert "2.50K / 1.25M (1.25M total)" in rendered
+    assert "999.00 / 1.00K (1.00M total)" in rendered
     assert "1.5 分钟" in rendered
 
 
@@ -85,7 +89,14 @@ def test_comparison_api_creates_cross_product_and_exposes_live_batch(tmp_path, m
 class _BatchGenerator:
     def generate(self, instance, client, model, workflow, workspace=None):
         return Prediction(instance_id=instance.instance_id, model_name_or_path=model,
-                          client=client, workflow=workflow, model_patch="patch")
+                          client=client, workflow=workflow, model_patch=(
+                              "diff --git a/src/app.py b/src/app.py\n"
+                              "--- a/src/app.py\n"
+                              "+++ b/src/app.py\n"
+                              "@@ -1 +1 @@\n"
+                              "-old\n"
+                              "+new\n"
+                          ))
 
 
 class _BatchBackend:

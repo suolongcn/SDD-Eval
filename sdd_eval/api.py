@@ -225,6 +225,13 @@ def latest_validation(instance_id: str):
     return value
 
 
+@app.get("/api/validations/{validation_id}")
+def validation(validation_id: str):
+    value = store.get_instance_validation_by_id(validation_id)
+    if not value: raise HTTPException(404, "instance validation not found")
+    return value
+
+
 @app.get("/api/jobs")
 def jobs(status: str | None = None, instance_id: str | None = None):
     return store.list_jobs(status=status, instance_id=instance_id)
@@ -363,6 +370,13 @@ def comparison_report_csv(instance_ids: str | None = None, models: str | None = 
 
 def _comparison_report_html(batch_id: str, report: dict) -> str:
     escape = lambda value: html.escape(str(value if value is not None else "-"))
+    def format_tokens(value):
+        tokens = float(value or 0)
+        if abs(tokens) >= 1_000_000:
+            return f"{tokens / 1_000_000:.2f}M"
+        if abs(tokens) >= 1_000:
+            return f"{tokens / 1_000:.2f}K"
+        return f"{tokens:.2f}"
     display_status = lambda value: {
         "queued": "排队中", "preparing": "准备中", "generating": "生成中", "evaluating": "评测中",
         "completed": "已完成", "failed": "失败", "cancelled": "已取消", "resolved": "已解决",
@@ -374,7 +388,7 @@ def _comparison_report_html(batch_id: str, report: dict) -> str:
         f"<td>{row['resolve_rate'] * 100:.1f}%</td><td><b>{row['average_score']:.1f}</b></td>"
         f"<td>{row['functional_score']:.1f}</td><td>{row['code_quality_score']:.1f}</td>"
         f"<td>{row['documentation_score']:.1f}</td>"
-        f"<td>{row.get('total_input_tokens', 0)} / {row.get('total_output_tokens', 0)} ({row.get('total_tokens', 0)} total)</td>"
+        f"<td>{format_tokens(row.get('total_input_tokens', 0))} / {format_tokens(row.get('total_output_tokens', 0))} ({format_tokens(row.get('total_tokens', 0))} total)</td>"
         f"<td>{row['avg_latency_ms'] / 60000:.1f} 分钟</td></tr>"
         for row in sorted(
             report.get("model_comparison", []),

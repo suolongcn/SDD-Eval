@@ -80,7 +80,10 @@ class LocalEvaluationBackend:
         # On a Windows local run that path becomes a single shared C:\sdd-cache
         # directory, where concurrent Maven writers fail on `.lastUpdated`
         # files. Give every isolated checkout its own repository instead.
-        if os.name == "nt":
+        # Do not rewrite paths inside commands forwarded to WSL/Docker. Those
+        # paths belong to the Linux container and must keep /sdd-cache intact.
+        executable = Path(command[0]).name.lower() if command else ""
+        if os.name == "nt" and executable not in {"wsl.exe", "docker", "docker.exe"}:
             local_m2 = (cwd / ".sdd_eval_m2").resolve()
             command = [
                 argument.replace("-Dmaven.repo.local=/sdd-cache/m2", f"-Dmaven.repo.local={local_m2}")
@@ -103,6 +106,27 @@ class LocalEvaluationBackend:
             return CommandResult(False, 124, f"{stdout}{stderr}\nCommand timed out after {timeout}s")
         except OSError as error:
             return CommandResult(False, 127, str(error))
+
+    def _run_build(self, command: Sequence[str], cwd: Path, timeout: int) -> tuple[CommandResult, str | None]:
+        """Run a build, recovering from the known Windows Maven NoHttp cache issue.
+
+        Maven's NoHttp check validates URLs embedded in cached third-party POM
+        metadata.  On the local Windows backend this can fail before Java
+        compilation even though the project itself is buildable.  A retry that
+        skips only Checkstyle is safe here because Checkstyle is a quality gate,
+        while the executable build and oracle tests remain enabled.
+        """
+        build = self._run(command, cwd, timeout)
+        if build.passed:
+            return build, None
+        output = build.output.lower()
+        if "nohttp-checkstyle-validation" not in output and "nohttp:" not in output:
+            return build, None
+        retry_command = list(command)
+        if not any(argument.startswith("-Dcheckstyle.skip") for argument in retry_command):
+            retry_command.insert(1, "-Dcheckstyle.skip=true")
+        retry = self._run(retry_command, cwd, timeout)
+        return retry, retry.output
 
     def _prepare_checkout(self, instance: BenchmarkInstance, destination: Path) -> tuple[Path | None, str]:
         """Fetch only the requested base commit instead of cloning full history.
@@ -188,8 +212,12 @@ class LocalEvaluationBackend:
     def _run_build_and_tests(self, root: Path, instance: BenchmarkInstance, oracle: EvaluationOracle, result: CheckoutResult) -> None:
         cwd = self._working_directory(root, instance)
         if instance.environment.build_command:
-            build = self._run(instance.environment.build_command, cwd, instance.environment.build_timeout_seconds)
+            build, retry_log = self._run_build(
+                instance.environment.build_command, cwd, instance.environment.build_timeout_seconds,
+            )
             result.logs["build"] = build.output
+            if retry_log is not None:
+                result.logs["build_retry_checkstyle_skip"] = retry_log
             result.build_passed = build.passed
             if not build.passed:
                 result.error = "build command failed"
@@ -502,6 +530,8 @@ class LocalEvaluationBackend:
             gold_patch_applied=gold.patch_applied,
             gold_fail_to_pass_passed=gold_f2p_passed,
             gold_pass_to_pass_passed=gold_p2p_passed,
+            baseline_test_cases=baseline.test_cases,
+            gold_test_cases=gold.test_cases,
             errors=errors,
             logs=logs,
             environment_digest=digest,

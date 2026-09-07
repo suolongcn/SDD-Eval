@@ -147,6 +147,10 @@ def test_gold_validation_and_prediction_resolve(tmp_path):
     assert validation.baseline_pass_to_pass_passed
     assert validation.gold_fail_to_pass_passed
     assert validation.gold_pass_to_pass_passed
+    assert validation.baseline_test_cases["fail_to_pass"][0]["passed"] is False
+    assert validation.baseline_test_cases["pass_to_pass"][0]["passed"] is True
+    assert validation.gold_test_cases["fail_to_pass"][0]["passed"] is True
+    assert validation.gold_test_cases["pass_to_pass"][0]["passed"] is True
     assert result.outcome == "resolved" and result.resolved
     assert result.score == 100
     assert result.fail_to_pass_passed == result.fail_to_pass_total == 1

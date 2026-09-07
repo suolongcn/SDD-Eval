@@ -208,6 +208,8 @@ class InstanceValidationResult(BaseModel):
     gold_patch_applied: bool = False
     gold_fail_to_pass_passed: bool = False
     gold_pass_to_pass_passed: bool = False
+    baseline_test_cases: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    gold_test_cases: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
     logs: dict[str, str] = Field(default_factory=dict)
     environment_digest: str = ""

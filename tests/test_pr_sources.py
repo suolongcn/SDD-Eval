@@ -104,6 +104,8 @@ def test_import_endpoint_persists_instance_and_private_oracle(tmp_path, monkeypa
     assert instance.base_commit == "base123"
     assert instance.source_pr_url.endswith("/pull/7")
     assert instance.reference_code_lines == 1
+    assert instance.docker.image == "python:3.12-slim"
+    assert instance.docker.pull is True
     assert oracle.gold_patch == diff
     assert oracle.reference_commit == "head456"
     assert oracle.fail_to_pass == [".sdd_eval_tests/pr_7_fail.py"]
@@ -127,6 +129,9 @@ def test_dashboard_exposes_pr_source_filters_and_actions():
     script = TestClient(api.app).get("/dashboard.js")
     assert script.status_code == 200
     assert "window.searchSourceRepositories" in script.text
+    assert "验证脚本与说明" in script.text
+    assert "私有 FAIL_TO_PASS 选择器" in script.text
+    assert "私有 PASS_TO_PASS 选择器" in script.text
     assert script.headers["content-type"].startswith("application/javascript")
     assert '<script src="/dashboard.js"></script>' in html
     assert "searchSourceRepositories" in api.dashboard_script().body.decode()

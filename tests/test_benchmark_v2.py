@@ -327,6 +327,29 @@ def test_instance_test_summaries_expose_counts_without_private_selectors(tmp_pat
     assert "secret gold" not in response.text
 
 
+def test_validation_detail_api_returns_one_validation(tmp_path, monkeypatch):
+    store = Store(str(tmp_path / "validation-detail.db"))
+    instance = sample_instance()
+    validation = InstanceValidationResult(
+        validation_id="validation-detail",
+        instance_id=instance.instance_id,
+        valid=True,
+        baseline_test_cases={"fail_to_pass": [{"selector": "target", "passed": False, "returncode": 1, "output": "failed as expected"}]},
+        gold_test_cases={"fail_to_pass": [{"selector": "target", "passed": True, "returncode": 0, "output": "passed"}]},
+    )
+    store.put_benchmark_instance(instance)
+    store.put_instance_validation(validation)
+    monkeypatch.setattr(api, "store", store)
+
+    client = TestClient(api.app)
+    response = client.get("/api/validations/validation-detail")
+
+    assert response.status_code == 200
+    assert response.json()["validation_id"] == "validation-detail"
+    assert response.json()["gold_test_cases"]["fail_to_pass"][0]["passed"] is True
+    assert client.get("/api/validations/missing").status_code == 404
+
+
 def test_dashboard_only_contains_v2_navigation(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "store", Store(str(tmp_path / "dashboard.db")))
     response = TestClient(api.app).get("/")
@@ -385,6 +408,23 @@ def test_dashboard_result_details_include_artifacts_scores_and_test_cases():
     assert "test_cases" in html
     assert "renderMarkdown" in html
     assert "renderDiff" in html
+
+
+def test_dashboard_validation_details_explain_cases_and_success_criteria():
+    root = Path(__file__).parents[1].joinpath("sdd_eval")
+    html = root.joinpath("dashboard.html").read_text(encoding="utf-8")
+    script = root.joinpath("dashboard.js").read_text(encoding="utf-8")
+
+    assert "点击“详情”可查看每条用例" in html
+    assert 'data-dashboard-action="validation-details"' in script
+    assert "showValidationDetails" in script
+    assert 'state.validations.find(item => item.validation_id === validationId)' in script
+    assert '`/api/validations/${encodeURIComponent(validationId)}`' not in script
+    assert "Baseline 目标测试必须失败" in script
+    assert "Gold 目标测试必须通过" in script
+    assert "`${phase}_test_cases`" in script
+    assert 'renderValidationCases(validation, "baseline"' in script
+    assert 'renderValidationCases(validation, "gold"' in script
 
 
 def test_instances_tab_renders_official_pr_line_count():

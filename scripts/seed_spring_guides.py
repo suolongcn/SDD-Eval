@@ -233,9 +233,22 @@ def main() -> None:
             base_commit=git_head(repository), problem_statement=task["problem"], language="java",
             source_issue_url=None, difficulty="easy",
             environment=EnvironmentSpec(
-                working_directory="complete", build_command=["cmd.exe", "/c", "mvnw.cmd", "-q", "-DskipTests", "package"],
-                test_command=["cmd.exe", "/c", "mvnw.cmd", "-q", "-Dtest={tests}", "test"], test_timeout_seconds=300,
+                working_directory="complete",
+                setup_commands=[
+                    ["mvn", "-q", "-Dmaven.repo.local=/sdd-cache/m2", "-DskipTests", "dependency:go-offline"],
+                    ["mvn", "-q", "-Dmaven.repo.local=/sdd-cache/m2", "dependency:get", "-Dartifact=org.apache.maven.surefire:surefire-junit-platform:3.5.6"],
+                    ["mvn", "-q", "-Dmaven.repo.local=/sdd-cache/m2", "dependency:get", "-Dartifact=org.junit.platform:junit-platform-launcher:6.0.3"],
+                    ["mvn", "-q", "-Dmaven.repo.local=/sdd-cache/m2", f"-Dtest={task['pass_to_pass']}", "test"],
+                ],
+                build_command=["mvn", "-q", "-Dmaven.repo.local=/sdd-cache/m2", "-DskipTests", "package"],
+                test_command=["mvn", "-q", "-Dmaven.repo.local=/sdd-cache/m2", "-Dtest={tests}", "test"],
+                setup_timeout_seconds=1200, build_timeout_seconds=900, test_timeout_seconds=600,
             ),
+            docker={
+                "image": "docker.1ms.run/library/maven:3.9-eclipse-temurin-21",
+                "pull": True,
+                "dependency_cache_key": "maven-spring-guides",
+            },
             requirements=[RequirementIR(id="REQ-1", description=task["requirement"], kind="boundary",
                                         acceptance_criteria=[task["requirement"]], source_refs=[task["repo_url"]])],
             constraints=["Preserve existing endpoint behavior", "Do not modify hidden tests"],
@@ -257,9 +270,9 @@ def main() -> None:
         )
         store.delete_benchmark_instance(instance.instance_id)
         store.put_benchmark_instance(instance, oracle); store.put_prediction(prediction)
-        store.put_job(BenchmarkJob(kind="validate_instance", instance_id=instance.instance_id, backend="local", max_attempts=1))
+        store.put_job(BenchmarkJob(kind="validate_instance", instance_id=instance.instance_id, backend="docker", max_attempts=1))
         store.put_job(BenchmarkJob(kind="evaluate_prediction", instance_id=instance.instance_id,
-                                   prediction_id=prediction.prediction_id, backend="local", max_attempts=1))
+                                   prediction_id=prediction.prediction_id, backend="docker", max_attempts=1))
         print(f"seeded {instance.instance_id} -> {prediction.prediction_id}")
 
 

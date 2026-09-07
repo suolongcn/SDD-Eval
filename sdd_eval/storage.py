@@ -216,6 +216,11 @@ class Store:
             row = connection.execute("select data from instance_validations where instance_id=? order by created_at desc limit 1", (instance_id,)).fetchone()
         return InstanceValidationResult.model_validate_json(row[0]) if row else None
 
+    def get_instance_validation_by_id(self, validation_id: str):
+        with self.conn() as connection:
+            row = connection.execute("select data from instance_validations where id=?", (validation_id,)).fetchone()
+        return InstanceValidationResult.model_validate_json(row[0]) if row else None
+
     def list_instance_validations(self, instance_id: str | None = None):
         query, params = "select data from instance_validations", []
         if instance_id: query += " where instance_id=?"; params.append(instance_id)
@@ -362,6 +367,8 @@ class Store:
             allowed = {"failed", "cancelled"} | ({"completed"} if allow_completed else set())
             if job.status not in allowed: return None
             if job.status == "completed":
+                if job.kind == "generate_and_evaluate":
+                    job.prediction_id = None
                 job.result_id = None
             if replacement_model is not None:
                 if job.kind != "generate_and_evaluate": return None

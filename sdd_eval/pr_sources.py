@@ -215,6 +215,7 @@ class PullRequestSourceService:
             repo=f"https://{request.forge}.com/{request.repository}.git", base_commit=pr.base_commit,
             problem_statement=pr.title + (("\n\n" + pr.body) if pr.body else ""), language=language,
             environment=EnvironmentSpec(test_command=["python", "{tests}"]),
+            docker={"image": "python:3.12-slim", "pull": True},
             requirements=[RequirementIR(id=f"PR-{request.number}", description=pr.title,
                 acceptance_criteria=["The merged pull request behavior is preserved."], source_refs=[pr.url])],
             constraints=["Preserve behavior outside the pull request scope", "Do not modify hidden Oracle tests"],

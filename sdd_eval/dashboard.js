@@ -2,7 +2,14 @@
 (() => {
   const $ = selector => document.querySelector(selector);
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
-  const state = {instances: [], jobs: [], batches: [], report: null, selectedBatch: ""};
+  const formatTokens = value => {
+    const tokens = Number(value);
+    if (!Number.isFinite(tokens)) return "-";
+    if (Math.abs(tokens) >= 1000000) return `${(tokens / 1000000).toFixed(2)}M`;
+    if (Math.abs(tokens) >= 1000) return `${(tokens / 1000).toFixed(2)}K`;
+    return tokens.toFixed(2);
+  };
+  const state = {instances: [], validations: [], jobs: [], batches: [], report: null, selectedBatch: ""};
   const api = async (path, options) => {
     const response = await fetch(path, options);
     const type = response.headers.get("content-type") || "";
@@ -13,10 +20,61 @@
   const empty = text => `<div class="empty">${esc(text)}</div>`;
   const badge = value => `<span class="badge ${esc(value)}">${esc(value)}</span>`;
   const statusText = status => ({queued: "Queued", preparing: "Preparing", generating: "Generating", evaluating: "Evaluating", completed: "Completed", failed: "Failed", cancelled: "Cancelled"}[status] || status);
+  const percent = value => `${Math.max(0, Math.min(100, Number(value) || 0)).toFixed(1)}%`;
+  const resultCases = (result, group) => result.test_cases?.[group] || [];
+  const resultLogs = result => result.functional_metrics?.logs || {};
+  const scoreBar = (label, value, description) => `<div class="score-row"><b>${esc(label)}</b><span>${Number(value || 0).toFixed(1)} / 100</span><div><div class="score-bar"><i style="width:${percent(value)}"></i></div><span class="muted">${esc(description)}</span></div></div>`;
+  const keyValue = (label, value, extraClass = "") => `<div class="detail-meta-item ${extraClass}"><span class="muted">${esc(label)}</span><b>${value}</b></div>`;
+  const tabButton = (id, label, active = false) => `<button class="${active ? "active" : ""}" onclick="selectResultDetailPane('${id}', this)">${esc(label)}</button>`;
+  const renderCases = (result, group, description) => {
+    const cases = resultCases(result, group);
+    if (!cases.length) return empty(description);
+    return cases.map(item => `<details class="case-card"><summary><span>${esc(item.selector || "Unnamed test")}</span><span class="case-status">${badge(item.passed ? "passed" : "failed")}</span></summary><div class="case-meta">Exit code: ${esc(item.returncode ?? "-")}</div><pre>${esc(item.output || "No command output was recorded.")}</pre></details>`).join("");
+  };
+  const renderLogGroups = result => {
+    const logs = resultLogs(result);
+    const groups = [
+      ["准备环境", ["checkout", "setup_1", "setup_2", "setup_3", "image_prepare", "container_create", "container_start", "grading_network"]],
+      ["构建与补丁", ["model_patch", "test_patch", "build", "build_retry_checkstyle_skip", "alibaba_java"]],
+      ["测试执行", ["fail_to_pass", "pass_to_pass", "code_style", "test_coverage"]],
+      ["清理", ["container_cleanup"]],
+    ];
+    const rendered = new Set();
+    const section = ([title, keys]) => {
+      const entries = keys.filter(key => Object.hasOwn(logs, key));
+      if (!entries.length) return "";
+      entries.forEach(key => rendered.add(key));
+      return `<section class="detail-log-group"><h3>${title}</h3>${entries.map(key => `<details class="log-card"><summary>${esc(key)}</summary><pre>${esc(logs[key] || "(empty)")}</pre></details>`).join("")}</section>`;
+    };
+    const grouped = groups.map(section).join("");
+    const remaining = Object.keys(logs).filter(key => !rendered.has(key));
+    const other = remaining.length ? `<section class="detail-log-group"><h3>其他日志</h3>${remaining.map(key => `<details class="log-card"><summary>${esc(key)}</summary><pre>${esc(logs[key] || "(empty)")}</pre></details>`).join("")}</section>` : "";
+    return grouped || other ? grouped + other : empty("该评测没有记录执行日志。");
+  };
+  const validationCheck = (label, passed, expected) => `<div class="validation-check ${passed ? "passed" : "failed"}"><span>${passed ? "✓" : "×"}</span><div><b>${esc(label)}</b><p>${esc(expected)}</p></div>${badge(passed ? "通过" : "未通过")}</div>`;
+  const renderValidationCases = (validation, phase, group, expectedPassed) => {
+    const cases = validation[`${phase}_test_cases`]?.[group] || [];
+    if (!cases.length) return empty("该次校验没有保存结构化测试用例明细。");
+    return cases.map(item => {
+      const expectationMet = Boolean(item.passed) === expectedPassed;
+      const expectation = expectedPassed ? "预期：通过" : "预期：失败";
+      return `<details class="case-card"><summary><span>${esc(item.selector || "未命名测试用例")}</span><span class="case-status"><span class="muted">${expectation}</span>${badge(expectationMet ? "符合预期" : "不符合预期")}</span></summary><div class="case-meta">实际：${item.passed ? "通过" : "失败"} · Exit code: ${esc(item.returncode ?? "-")}</div><pre>${esc(item.output || "没有记录命令输出。")}</pre></details>`;
+    }).join("");
+  };
+  const renderValidationLogs = validation => {
+    const logs = validation.logs || {};
+    const entries = Object.entries(logs);
+    if (!entries.length) return empty("该次校验没有记录执行日志。");
+    return ["baseline", "gold"].map(phase => {
+      const matching = entries.filter(([key]) => key.startsWith(`${phase}_`));
+      if (!matching.length) return "";
+      return `<section class="detail-log-group"><h3>${phase === "baseline" ? "Baseline 基线日志" : "Gold 参考补丁日志"}</h3>${matching.map(([key, value]) => `<details class="log-card"><summary>${esc(key.replace(`${phase}_`, ""))}</summary><pre>${esc(value || "(empty)")}</pre></details>`).join("")}</section>`;
+    }).join("");
+  };
   async function loadPredictions() {
     const instanceId = $("#predictionInstanceFilter")?.value;
     state.predictions = await api("/api/predictions" + (instanceId ? "?instance_id=" + encodeURIComponent(instanceId) : ""));
-    $("#predictionTable").innerHTML = state.predictions.length ? `<table><thead><tr><th>Prediction</th><th>Instance</th><th>Model / Workflow</th><th>Patch Hash</th></tr></thead><tbody>${state.predictions.map(item => `<tr><td class="mono">${esc(item.prediction_id)}</td><td class="mono">${esc(item.instance_id)}</td><td>${esc(item.model_name_or_path)}<br><span class="muted">${esc(item.client)} / ${esc(item.workflow)}</span></td><td class="mono">${esc((item.patch_hash || "").slice(0, 12))}</td></tr>`).join("")}</tbody></table>` : empty("No predictions");
+    $("#predictionTable").innerHTML = state.predictions.length ? `<table><thead><tr><th>Prediction</th><th>Instance</th><th>Model / Workflow</th><th>Patch Hash</th><th></th></tr></thead><tbody>${state.predictions.map(item => `<tr><td class="mono">${esc(item.prediction_id)}</td><td class="mono">${esc(item.instance_id)}</td><td>${esc(item.model_name_or_path)}<br><span class="muted">${esc(item.client)} / ${esc(item.workflow)}</span></td><td class="mono">${esc((item.patch_hash || "").slice(0, 12))}</td><td><button class="action secondary" data-dashboard-action="prediction-details" data-record-id="${esc(item.prediction_id)}">详情</button></td></tr>`).join("")}</tbody></table>` : empty("No predictions");
   }
   // Expose the loader before the asynchronous refresh starts so inline or
   // restored form events can never resolve an undefined global function.
@@ -26,15 +84,68 @@
     $("#resultTable").innerHTML = results.length ? `<table><thead><tr><th>Evaluation</th><th>Instance</th><th>Outcome</th><th>Composite</th><th>Functional</th><th>Code</th><th>Docs</th><th></th></tr></thead><tbody>${results.map(result => `<tr><td class="mono">${esc(result.evaluation_id)}</td><td class="mono">${esc(result.instance_id)}<br>${esc(result.prediction_id)}</td><td>${badge(result.outcome)}</td><td><b>${Number(result.score || 0).toFixed(1)}</b></td><td>${Number(result.functional_score || 0).toFixed(1)}</td><td>${Number(result.code_quality_score || 0).toFixed(1)}</td><td>${Number(result.documentation_score || 0).toFixed(1)}</td><td><button class="action secondary" data-dashboard-action="result-details" data-record-id="${esc(result.evaluation_id)}">详情</button></td></tr>`).join("")}</tbody></table>` : empty("No evaluation results");
   }
   async function loadValidations() {
-    const validations = await api("/api/validations");
-    $("#validationTable").innerHTML = validations.length ? `<table><thead><tr><th>Instance</th><th>Valid</th><th>Baseline</th><th>Gold</th><th>Errors</th></tr></thead><tbody>${validations.map(item => `<tr><td class="mono">${esc(item.instance_id)}</td><td>${item.valid ? badge("valid") : badge("failed")}</td><td>${item.baseline_pass_to_pass_passed ? "pass" : "fail"}</td><td>${item.gold_fail_to_pass_passed && item.gold_pass_to_pass_passed ? "pass" : "fail"}</td><td>${esc((item.errors || []).join("; "))}</td></tr>`).join("")}</tbody></table>` : empty("No validations");
+    state.validations = await api("/api/validations");
+    $("#validationTable").innerHTML = state.validations.length ? `<table><thead><tr><th>Instance</th><th>Valid</th><th>Baseline</th><th>Gold</th><th>Errors</th><th></th></tr></thead><tbody>${state.validations.map(item => `<tr><td class="mono">${esc(item.instance_id)}<br><span class="muted">${esc(item.validation_id)}</span></td><td>${item.valid ? badge("valid") : badge("failed")}</td><td>${item.baseline_fail_to_pass_failed && item.baseline_pass_to_pass_passed ? badge("pass") : badge("fail")}</td><td>${item.gold_patch_applied && item.gold_fail_to_pass_passed && item.gold_pass_to_pass_passed ? badge("pass") : badge("fail")}</td><td class="problem">${esc((item.errors || []).join("; ") || "-")}</td><td><button class="action secondary" data-dashboard-action="validation-details" data-record-id="${esc(item.validation_id)}">详情</button></td></tr>`).join("")}</tbody></table>` : empty("暂无实例校验记录");
   }
   function showModal(html) { $("#modalBody").innerHTML = html; $("#modal").classList.add("open"); }
   function closeModal() { $("#modal").classList.remove("open"); }
   window.closeModal = closeModal;
   window.showJson = (title, value) => showModal(`<h2>${esc(title)}</h2><pre>${esc(JSON.stringify(value, null, 2))}</pre>`);
+  const renderValueList = (values, emptyText = "暂无") => values?.length
+    ? `<ul>${values.map(value => `<li>${esc(value)}</li>`).join("")}</ul>`
+    : `<p class="muted">${esc(emptyText)}</p>`;
+  const renderCommand = command => command?.length ? `<span class="mono">${esc(command.join(" "))}</span>` : `<span class="muted">未配置</span>`;
+  const sourceLink = (url, label) => {
+    if (!url) return `<span class="muted">未关联</span>`;
+    try {
+      const parsed = new URL(url);
+      if (!["http:", "https:"].includes(parsed.protocol)) return esc(url);
+      return `<a class="source-link" href="${esc(parsed.href)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`;
+    } catch { return esc(url); }
+  };
+  window.selectInstanceDetailPane = (id, button) => {
+    document.querySelectorAll("#modalBody .detail-pane").forEach(pane => pane.classList.toggle("active", pane.id === `instance-detail-${id}`));
+    document.querySelectorAll("#modalBody .detail-tabs button").forEach(tab => tab.classList.toggle("active", tab === button));
+  };
+  window.showInstanceDetails = async instanceId => {
+    try {
+      const [instance, summaries] = await Promise.all([
+        api(`/api/instances/${encodeURIComponent(instanceId)}`),
+        api("/api/instance-test-summaries"),
+      ]);
+      const summary = summaries.find(item => item.instance_id === instanceId) || {};
+      const requirements = instance.requirements || [];
+      const environment = instance.environment || {};
+      const docker = instance.docker || {};
+      const requirementCards = requirements.length ? requirements.map(requirement => `<article class="requirement-card"><div class="requirement-heading"><b>${esc(requirement.id)}</b><span>${badge(requirement.kind || "functional")} ${badge(requirement.priority || "must")}</span></div><p>${esc(requirement.description || "-")}</p><h4>验收标准</h4>${renderValueList(requirement.acceptance_criteria, "未配置验收标准")}<div class="requirement-refs"><span><b>来源：</b>${esc((requirement.source_refs || []).join(", ") || "-")}</span><span><b>Oracle 引用：</b>${esc((requirement.oracle_refs || []).join(", ") || "-")}</span></div></article>`).join("") : empty("该实例未记录结构化需求。");
+      const setupCommands = environment.setup_commands || [];
+      const latestF2p = summary.fail_to_pass ? `${summary.fail_to_pass.passed} / ${summary.fail_to_pass.total}` : "尚未执行";
+      const latestP2p = summary.pass_to_pass ? `${summary.pass_to_pass.passed} / ${summary.pass_to_pass.total}` : "尚未执行";
+      const validationCommand = environment.test_command?.length ? environment.test_command.join(" ") : "未配置测试命令";
+      const validationState = summary.validation ? (summary.validation.valid ? "实例 Oracle 已通过基线与 Gold 校验" : "实例 Oracle 校验未通过") : "尚未执行实例 Oracle 校验";
+      showModal(`<div class="instance-detail"><h2>测试实例详情</h2><p class="muted mono">${esc(instance.instance_id)}</p><div class="detail-summary"><div class="detail-stat"><span class="muted">数据集</span><b>${esc(instance.dataset_id || "-")}</b></div><div class="detail-stat"><span class="muted">数据分组</span><b>${badge(instance.split || "-")}</b></div><div class="detail-stat"><span class="muted">评测次数</span><b>${esc(summary.evaluation_count || 0)}</b></div><div class="detail-stat"><span class="muted">实例校验</span><b>${summary.validation ? badge(summary.validation.valid ? "valid" : "invalid") : "尚未校验"}</b></div></div><div class="detail-tabs"><button class="active" onclick="selectInstanceDetailPane('overview', this)">概览</button><button onclick="selectInstanceDetailPane('requirements', this)">需求与约束 (${requirements.length})</button><button onclick="selectInstanceDetailPane('validation', this)">验证脚本与说明</button><button onclick="selectInstanceDetailPane('environment', this)">执行环境</button><button onclick="selectInstanceDetailPane('source', this)">来源与版本</button></div><section id="instance-detail-overview" class="detail-pane active"><div class="detail-meta">${keyValue("实例编号", esc(instance.instance_id), "mono")}${keyValue("编程语言", esc(instance.language || "-"))}${keyValue("难度", esc(instance.difficulty || "未标注"))}${keyValue("评测协议", esc(instance.evaluation_protocol || "-"))}${keyValue("最新目标测试", esc(latestF2p))}${keyValue("最新回归测试", esc(latestP2p))}</div><h3>问题描述</h3><div class="detail-note instance-problem">${esc(instance.problem_statement || "暂无问题描述")}</div></section><section id="instance-detail-requirements" class="detail-pane"><h3>结构化需求</h3><div class="requirement-list">${requirementCards}</div><h3>全局约束</h3>${renderValueList(instance.constraints, "未配置全局约束")}</section><section id="instance-detail-validation" class="detail-pane"><div class="detail-note ${summary.validation?.valid ? "success" : summary.validation ? "danger" : ""}">${esc(validationState)}</div><div class="validation-script-grid"><article class="validation-script-card"><div class="validation-script-heading"><b>FAIL_TO_PASS</b>${badge("目标验证")}</div><p>验证本次问题要求修复或新增的目标行为。基准版本应失败，应用正确补丁后应全部通过；任一目标用例失败时，结果记为目标测试未通过。</p><h4>执行脚本</h4><pre>${esc(validationCommand)}\n# {tests} 由评测器替换为私有 FAIL_TO_PASS 选择器</pre><div class="validation-result"><span>最近执行</span><b>${esc(latestF2p)}</b></div></article><article class="validation-script-card"><div class="validation-script-heading"><b>PASS_TO_PASS</b>${badge("回归验证")}</div><p>验证修改前已经正确的行为没有发生回归。基准版本与正确补丁版本均应通过；任一回归用例失败时，结果记为回归失败。</p><h4>执行脚本</h4><pre>${esc(validationCommand)}\n# {tests} 由评测器替换为私有 PASS_TO_PASS 选择器</pre><div class="validation-result"><span>最近执行</span><b>${esc(latestP2p)}</b></div></article></div><p class="muted validation-privacy">验证脚本的调用方式与判定规则可见；具体 test patch 和测试选择器属于私有 Oracle，不会通过公开页面或 API 返回。</p></section><section id="instance-detail-environment" class="detail-pane"><h3>运行配置</h3><div class="detail-meta">${keyValue("环境编号", esc(instance.environment_id || "默认环境"))}${keyValue("工作目录", esc(environment.working_directory || "."), "mono")}${keyValue("构建命令", renderCommand(environment.build_command))}${keyValue("测试命令", renderCommand(environment.test_command))}${keyValue("初始化超时", `${esc(environment.setup_timeout_seconds || 0)} 秒`)}${keyValue("构建 / 测试超时", `${esc(environment.build_timeout_seconds || 0)} / ${esc(environment.test_timeout_seconds || 0)} 秒`)}</div><h3>初始化命令</h3>${setupCommands.length ? setupCommands.map((command, index) => `<div class="detail-note mono">${index + 1}. ${esc(command.join(" "))}</div>`).join("") : empty("未配置初始化命令。")}<h3>容器配置</h3><div class="detail-meta">${keyValue("镜像", esc(docker.image || "未配置"))}${keyValue("平台", esc(docker.platform || "默认"))}${keyValue("评分网络", docker.grading_network_disabled === false ? "启用" : "禁用")}${keyValue("只读根目录", docker.read_only_root === false ? "否" : "是")}${keyValue("CPU / 内存", `${esc(docker.limits?.cpus ?? "-")} / ${esc(docker.limits?.memory_mb ?? "-")} MB`)}${keyValue("PID / tmpfs", `${esc(docker.limits?.pids_limit ?? "-")} / ${esc(docker.limits?.tmpfs_mb ?? "-")} MB`)}</div></section><section id="instance-detail-source" class="detail-pane"><h3>代码仓库</h3><div class="detail-meta">${keyValue("仓库", esc(instance.repo || "-"))}${keyValue("基准提交", esc(instance.base_commit || "-"), "mono")}${keyValue("Issue", sourceLink(instance.source_issue_url, "打开 Issue"))}${keyValue("Pull Request", sourceLink(instance.source_pr_url, "打开 PR"))}${keyValue("参考改动行数", instance.reference_code_lines == null ? "未记录" : `${esc(instance.reference_code_lines)}${instance.reference_code_estimated ? "（估算）" : ""}`)}${keyValue("创建时间", esc(instance.created_at || "-"))}</div><h3>数据版本</h3><div class="detail-meta">${keyValue("Schema", `v${esc(instance.schema_version || "-")}`)}${keyValue("数据集版本", esc(instance.dataset_version || "-"))}${keyValue("实例版本", esc(instance.version || "未标注"))}${keyValue("评测协议", esc(instance.evaluation_protocol || "-"))}</div></section></div>`);
+    } catch (error) { alert(`加载测试实例详情失败：${error.message}`); }
+  };
+  window.selectValidationDetailPane = (id, button) => {
+    document.querySelectorAll("#modalBody .detail-pane").forEach(pane => pane.classList.toggle("active", pane.id === `validation-detail-${id}`));
+    document.querySelectorAll("#modalBody .detail-tabs button").forEach(tab => tab.classList.toggle("active", tab === button));
+  };
+  window.showValidationDetails = async validationId => {
+    try {
+      let validation = state.validations.find(item => item.validation_id === validationId);
+      if (!validation) {
+        state.validations = await api("/api/validations");
+        validation = state.validations.find(item => item.validation_id === validationId);
+      }
+      if (!validation) throw new Error("实例校验记录不存在或已被删除");
+      const baselinePassed = validation.baseline_fail_to_pass_failed && validation.baseline_pass_to_pass_passed;
+      const goldPassed = validation.gold_patch_applied && validation.gold_fail_to_pass_passed && validation.gold_pass_to_pass_passed;
+      const errors = validation.errors || [];
+      showModal(`<div class="validation-detail"><h2>实例校验详情</h2><p class="muted mono">${esc(validation.validation_id)} · ${esc(validation.instance_id)}</p><div class="detail-summary"><div class="detail-stat"><span class="muted">最终结论</span><b>${badge(validation.valid ? "校验成功" : "校验失败")}</b></div><div class="detail-stat"><span class="muted">Baseline</span><b>${badge(baselinePassed ? "符合预期" : "不符合预期")}</b></div><div class="detail-stat"><span class="muted">Gold</span><b>${badge(goldPassed ? "符合预期" : "不符合预期")}</b></div><div class="detail-stat"><span class="muted">执行器</span><b>${esc(validation.harness_version || "-")}</b></div></div><div class="detail-tabs"><button class="active" onclick="selectValidationDetailPane('criteria', this)">成功条件</button><button onclick="selectValidationDetailPane('baseline', this)">Baseline 测试</button><button onclick="selectValidationDetailPane('gold', this)">Gold 测试</button><button onclick="selectValidationDetailPane('logs', this)">执行日志</button><button onclick="selectValidationDetailPane('raw', this)">原始数据</button></div><section id="validation-detail-criteria" class="detail-pane active"><div class="detail-note ${validation.valid ? "success" : "danger"}">${validation.valid ? "五项条件全部满足：该 Oracle 能证明基准版本存在目标问题，并且参考补丁修复目标行为且没有破坏回归行为。" : `校验未通过${errors.length ? `：${esc(errors.join("；"))}` : "，请查看以下失败条件和执行日志。"}`}</div><h3>如何判定校验成功</h3><div class="validation-check-list">${validationCheck("Baseline 目标测试必须失败", validation.baseline_fail_to_pass_failed, "FAIL_TO_PASS 在未应用 Gold 补丁时应全部失败，证明问题在基准版本中真实存在。")}${validationCheck("Baseline 回归测试必须通过", validation.baseline_pass_to_pass_passed, "PASS_TO_PASS 在基准版本中应全部通过，证明这些行为原本是正确的。")}${validationCheck("Gold 补丁必须成功应用", validation.gold_patch_applied, "参考补丁必须能应用到固定的 base_commit。")}${validationCheck("Gold 目标测试必须通过", validation.gold_fail_to_pass_passed, "应用 Gold 补丁后，所有 FAIL_TO_PASS 用例都应通过。")}${validationCheck("Gold 回归测试必须通过", validation.gold_pass_to_pass_passed, "应用 Gold 补丁后，所有 PASS_TO_PASS 用例仍应通过。")}</div>${errors.length ? `<h3>失败原因</h3>${renderValueList(errors)}` : ""}<h3>执行身份</h3><div class="detail-meta">${keyValue("Instance", esc(validation.instance_id), "mono")}${keyValue("Validation", esc(validation.validation_id), "mono")}${keyValue("Harness", esc(validation.harness_version || "-"))}${keyValue("环境摘要", esc(validation.environment_digest || "-"), "mono")}${keyValue("执行时间", esc(validation.created_at || "-"))}</div></section><section id="validation-detail-baseline" class="detail-pane"><div class="detail-note">Baseline 阶段只应用私有测试补丁，不应用 Gold 修复。目标用例应失败，回归用例应通过。</div><h3>FAIL_TO_PASS · 预期全部失败</h3>${renderValidationCases(validation, "baseline", "fail_to_pass", false)}<h3>PASS_TO_PASS · 预期全部通过</h3>${renderValidationCases(validation, "baseline", "pass_to_pass", true)}</section><section id="validation-detail-gold" class="detail-pane"><div class="detail-note">Gold 阶段先应用参考修复，再应用相同的私有测试补丁。目标和回归用例均应通过。</div><h3>FAIL_TO_PASS · 预期全部通过</h3>${renderValidationCases(validation, "gold", "fail_to_pass", true)}<h3>PASS_TO_PASS · 预期全部通过</h3>${renderValidationCases(validation, "gold", "pass_to_pass", true)}</section><section id="validation-detail-logs" class="detail-pane">${renderValidationLogs(validation)}</section><section id="validation-detail-raw" class="detail-pane"><p class="muted">完整校验记录，用于排查历史数据和执行环境问题。</p><details class="log-card"><summary>展开原始 JSON</summary><pre>${esc(JSON.stringify(validation, null, 2))}</pre></details></section></div>`);
+    } catch (error) { alert(`加载实例校验详情失败：${error.message}`); }
+  };
   document.querySelectorAll(".tab").forEach(button => button.onclick = () => { document.querySelectorAll(".tab,.view").forEach(item => item.classList.remove("active")); button.classList.add("active"); $("#" + button.dataset.view).classList.add("active"); });
-  document.addEventListener("click", event => { const button = event.target.closest("[data-dashboard-action]"); if (!button) return; const id = button.dataset.recordId; if (button.dataset.dashboardAction === "instance-details") window.showJson("Instance", state.instances.find(item => item.instance_id === id)); if (button.dataset.dashboardAction === "result-details") window.showResultDetails(id); });
+  document.addEventListener("click", event => { const button = event.target.closest("[data-dashboard-action]"); if (!button) return; const id = button.dataset.recordId; if (button.dataset.dashboardAction === "instance-details") window.showInstanceDetails(id); if (button.dataset.dashboardAction === "prediction-details") window.showPredictionDetails(id); if (button.dataset.dashboardAction === "result-details") window.showResultDetails(id); if (button.dataset.dashboardAction === "validation-details") window.showValidationDetails(id); });
   async function loadInstances() {
     const query = new URLSearchParams();
     if ($("#datasetFilter")?.value) query.set("dataset_id", $("#datasetFilter").value);
@@ -42,7 +153,7 @@
     state.instances = await api("/api/instances" + (query.toString() ? "?" + query : ""));
     const filter = $("#predictionInstanceFilter");
     if (filter) filter.innerHTML = '<option value="">All instances</option>' + state.instances.map(item => `<option value="${esc(item.instance_id)}">${esc(item.instance_id)}</option>`).join("");
-    $("#instanceTable").innerHTML = state.instances.length ? `<table><thead><tr><th>Instance</th><th>Dataset</th><th>Repository</th><th>Problem</th><th>Requirements</th></tr></thead><tbody>${state.instances.map(item => `<tr><td><b>${esc(item.instance_id)}</b><br>${badge(item.split)}</td><td>${esc(item.dataset_id)}</td><td>${esc(item.repo)}<br><span class="mono">${esc((item.base_commit || "").slice(0, 12))}</span></td><td class="problem">${esc(item.problem_statement)}</td><td>${item.requirements?.length || 0}</td></tr>`).join("")}</tbody></table>` : empty("No benchmark instances");
+    $("#instanceTable").innerHTML = state.instances.length ? `<table><thead><tr><th>Instance</th><th>Dataset</th><th>Repository</th><th>Problem</th><th>Requirements</th><th>操作</th></tr></thead><tbody>${state.instances.map(item => `<tr><td><b>${esc(item.instance_id)}</b><br>${badge(item.split)}</td><td>${esc(item.dataset_id)}</td><td>${esc(item.repo)}<br><span class="mono">${esc((item.base_commit || "").slice(0, 12))}</span></td><td class="problem">${esc(item.problem_statement)}</td><td>${item.requirements?.length || 0}</td><td><button class="action secondary" data-dashboard-action="instance-details" data-record-id="${esc(item.instance_id)}">详情</button></td></tr>`).join("")}</tbody></table>` : empty("No benchmark instances");
   }
   async function loadJobs() {
     state.jobs = await api("/api/jobs");
@@ -58,7 +169,7 @@
     const query = state.selectedBatch ? `?batch_id=${encodeURIComponent(state.selectedBatch)}` : "";
     state.report = await api("/api/comparisons/report" + query);
     const rows = state.report.model_comparison || [];
-    $("#comparisonTable").innerHTML = rows.length ? `<table><thead><tr><th>Model</th><th>Runs</th><th>Resolved</th><th>Resolve Rate</th><th>Composite</th><th>Functional</th><th>Code</th><th>Docs</th><th>Token In / Out</th><th>Latency</th></tr></thead><tbody>${rows.map(row => `<tr><td><b>${esc(row.model)}</b></td><td>${row.runs}</td><td>${row.resolved}</td><td>${(row.resolve_rate * 100).toFixed(1)}%</td><td><b>${Number(row.average_score).toFixed(1)}</b></td><td>${Number(row.functional_score).toFixed(1)}</td><td>${Number(row.code_quality_score).toFixed(1)}</td><td>${Number(row.documentation_score).toFixed(1)}</td><td>${row.avg_input_tokens} / ${row.avg_output_tokens}</td><td>${row.avg_latency_ms} ms</td></tr>`).join("")}</tbody></table>` : empty(state.selectedBatch ? "This batch has no results yet" : "No comparison report");
+    $("#comparisonTable").innerHTML = rows.length ? `<table><thead><tr><th>Model</th><th>Runs</th><th>Resolved</th><th>Resolve Rate</th><th>Composite</th><th>Functional</th><th>Code</th><th>Docs</th><th>Token In / Out</th><th>Latency</th></tr></thead><tbody>${rows.map(row => `<tr><td><b>${esc(row.model)}</b></td><td>${row.runs}</td><td>${row.resolved}</td><td>${(row.resolve_rate * 100).toFixed(1)}%</td><td><b>${Number(row.average_score).toFixed(1)}</b></td><td>${Number(row.functional_score).toFixed(1)}</td><td>${Number(row.code_quality_score).toFixed(1)}</td><td>${Number(row.documentation_score).toFixed(1)}</td><td>${formatTokens(row.avg_input_tokens)} / ${formatTokens(row.avg_output_tokens)}</td><td>${row.avg_latency_ms} ms</td></tr>`).join("")}</tbody></table>` : empty(state.selectedBatch ? "This batch has no results yet" : "No comparison report");
     const matrix = state.report.instance_matrix || [];
     $("#comparisonMatrix").innerHTML = matrix.length ? `<h3>Test case matrix</h3><table><thead><tr><th>Test case</th><th>Coding Agent</th><th>SDD Tool</th><th>Model</th><th>Status</th><th>Outcome</th><th>Score</th><th>Error</th></tr></thead><tbody>${matrix.map(item => `<tr><td class="mono">${esc(item.instance_id)}</td><td>${esc(item.client === "opencode" ? "OpenCode" : item.client === "codex" ? "Codex" : item.client || "-")}</td><td>${esc(item.workflow || "-")}</td><td>${esc(item.model)}</td><td>${esc(item.status)}</td><td>${item.outcome ? badge(item.outcome) : "-"}</td><td>${item.score == null ? "-" : Number(item.score).toFixed(1)}</td><td class="problem">${esc(item.error||"")}</td></tr>`).join("")}</tbody></table>` : "";
     $("#comparisonDetails").innerHTML = state.report.details?.length ? `<h3>Run details</h3><table><thead><tr><th>Instance</th><th>Model</th><th>Outcome</th><th>Score</th><th>FAIL_TO_PASS</th><th>PASS_TO_PASS</th><th>Latency</th></tr></thead><tbody>${state.report.details.map(item => `<tr><td class="mono">${esc(item.instance_id)}</td><td>${esc(item.model)}</td><td>${badge(item.outcome)}</td><td>${Number(item.score).toFixed(1)}</td><td>${item.fail_to_pass.passed} / ${item.fail_to_pass.total}</td><td>${item.pass_to_pass.passed} / ${item.pass_to_pass.total}</td><td>${item.token_usage?.latency_ms || 0} ms</td></tr>`).join("")}</tbody></table>` : "";
@@ -78,7 +189,44 @@
   window.cancelJob = async jobId => { try { await api(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {method: "POST"}); await refresh(); } catch (error) { alert(error.message); } };
   window.retryJob = async jobId => { try { await api(`/api/jobs/${encodeURIComponent(jobId)}/retry`, {method: "POST"}); await refresh(); } catch (error) { alert(error.message); } };
   window.showAttempts = async jobId => { try { showJson("Job attempts", await api(`/api/jobs/${encodeURIComponent(jobId)}/attempts`)); } catch (error) { alert(error.message); } };
-  window.showResultDetails = async evaluationId => { try { showJson("Evaluation result", await api(`/api/results/${encodeURIComponent(evaluationId)}`)); } catch (error) { alert(error.message); } };
+  window.selectPredictionDetailPane = (id, button) => {
+    document.querySelectorAll("#modalBody .detail-pane").forEach(pane => pane.classList.toggle("active", pane.id === `prediction-detail-${id}`));
+    document.querySelectorAll("#modalBody .detail-tabs button").forEach(tab => tab.classList.toggle("active", tab === button));
+  };
+  window.showPredictionDetails = async predictionId => {
+    try {
+      const [prediction, evaluations] = await Promise.all([
+        api(`/api/predictions/${encodeURIComponent(predictionId)}`),
+        api(`/api/results?prediction_id=${encodeURIComponent(predictionId)}`),
+      ]);
+      const ordered = [...evaluations].sort((left, right) => Date.parse(right.created_at || 0) - Date.parse(left.created_at || 0));
+      const latest = ordered[0];
+      const usage = prediction.token_usage || {};
+      const documents = prediction.artifacts?.documents || {};
+      const latestSummary = latest
+        ? `${badge(latest.outcome)} · ${Number(latest.score || 0).toFixed(1)} 分`
+        : "尚未评测";
+      const history = ordered.length ? `<table class="prediction-evaluation-table"><thead><tr><th>时间</th><th>结果</th><th>综合</th><th>功能</th><th>代码</th><th>文档</th><th>构建</th></tr></thead><tbody>${ordered.map(result => `<tr><td>${esc(result.created_at || "-")}</td><td>${badge(result.outcome)}</td><td><b>${Number(result.score || 0).toFixed(1)}</b></td><td>${Number(result.functional_score || 0).toFixed(1)}</td><td>${Number(result.code_quality_score || 0).toFixed(1)}</td><td>${Number(result.documentation_score || 0).toFixed(1)}</td><td>${result.build_passed ? badge("passed") : badge("failed")}</td></tr>`).join("")}</tbody></table>` : empty("此预测尚未产生评测结果。");
+      const documentCards = Object.entries(documents).length ? Object.entries(documents).map(([path, content]) => `<details class="doc-card"><summary>${esc(path)}</summary><pre>${esc(content || "(empty)")}</pre></details>`).join("") : empty("此预测未附带 SDD 文档。");
+      showModal(`<div class="prediction-detail"><h2>预测结果详情</h2><p class="muted mono">${esc(prediction.prediction_id)}</p><div class="detail-summary"><div class="detail-stat"><span class="muted">模型</span><b>${esc(prediction.model_name_or_path || "-")}</b></div><div class="detail-stat"><span class="muted">最新评测</span><b>${latestSummary}</b></div><div class="detail-stat"><span class="muted">评测次数</span><b>${ordered.length}</b></div><div class="detail-stat"><span class="muted">补丁大小</span><b>${(prediction.model_patch || "").split("\n").length} 行</b></div></div><div class="detail-tabs"><button class="active" onclick="selectPredictionDetailPane('overview', this)">概览</button><button onclick="selectPredictionDetailPane('scores', this)">评测得分 (${ordered.length})</button><button onclick="selectPredictionDetailPane('artifacts', this)">SDD 文档 (${Object.keys(documents).length})</button><button onclick="selectPredictionDetailPane('patch', this)">代码补丁</button><button onclick="selectPredictionDetailPane('raw', this)">原始数据</button></div><section id="prediction-detail-overview" class="detail-pane active"><div class="detail-meta">${keyValue("测试实例", esc(prediction.instance_id), "mono")}${keyValue("编码工具", esc(prediction.client || "-"))}${keyValue("SDD 工作流", esc(prediction.workflow || "-"))}${keyValue("创建时间", esc(prediction.created_at || "-"))}${keyValue("补丁哈希", esc(prediction.patch_hash || "-"), "mono")}${keyValue("输入 / 输出令牌", `${formatTokens(usage.input_tokens)} / ${formatTokens(usage.output_tokens)}`)}${keyValue("总令牌", formatTokens((Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0)))}${keyValue("生成耗时", usage.latency_ms == null ? "-" : `${Number(usage.latency_ms).toLocaleString()} ms`)}</div><h3>最新评测摘要</h3>${latest ? `<div class="detail-note ${latest.build_passed ? "success" : "danger"}">结论：${esc(latest.outcome)}；构建：${latest.build_passed ? "通过" : "未通过"}；目标测试：${latest.fail_to_pass_passed} / ${latest.fail_to_pass_total}；回归测试：${latest.pass_to_pass_passed} / ${latest.pass_to_pass_total}。</div>` : empty("尚未进入评测阶段。")}</section><section id="prediction-detail-scores" class="detail-pane">${latest ? `<h3>最新评测得分</h3>${scoreBar("综合得分", latest.score, "功能、代码质量和文档质量的加权结果")}${scoreBar("功能正确性", latest.functional_score, `目标测试 ${latest.fail_to_pass_passed}/${latest.fail_to_pass_total}，回归测试 ${latest.pass_to_pass_passed}/${latest.pass_to_pass_total}`)}${scoreBar("代码质量", latest.code_quality_score, latest.build_passed ? "构建通过，质量检查已参与评分" : "构建未通过，得分受限")}${scoreBar("文档质量", latest.documentation_score, "根据 SDD 文档、需求追踪和一致性检查评分")}` : ""}<h3>评测历史</h3>${history}</section><section id="prediction-detail-artifacts" class="detail-pane"><h3>附带 SDD 文档</h3>${documentCards}</section><section id="prediction-detail-patch" class="detail-pane"><h3>模型补丁</h3><pre>${esc(prediction.model_patch || "此预测不含代码补丁。")}</pre></section><section id="prediction-detail-raw" class="detail-pane"><p class="muted">完整预测和关联评测原始数据，用于排障。</p><details class="log-card"><summary>展开原始 JSON</summary><pre>${esc(JSON.stringify({prediction, evaluations: ordered}, null, 2))}</pre></details></section></div>`);
+    } catch (error) { alert(`加载预测结果详情失败：${error.message}`); }
+  };
+  window.selectResultDetailPane = (id, button) => {
+    document.querySelectorAll(".detail-pane").forEach(pane => pane.classList.toggle("active", pane.id === `result-detail-${id}`));
+    document.querySelectorAll(".detail-tabs button").forEach(tab => tab.classList.toggle("active", tab === button));
+  };
+  window.showResultDetails = async evaluationId => {
+    try {
+      const result = await api(`/api/results/${encodeURIComponent(evaluationId)}`);
+      const weights = result.score_weights || {functional: 0.5, code_quality: 0.25, documentation: 0.25};
+      const metrics = result.sdd_metrics || {};
+      const findings = result.quality_findings || [];
+      const f2p = result.fail_to_pass_total ? result.fail_to_pass_passed / result.fail_to_pass_total : 0;
+      const p2p = result.pass_to_pass_total ? result.pass_to_pass_passed / result.pass_to_pass_total : 1;
+      const findingRows = findings.length ? `<div class="finding-list">${findings.map(item => `<div class="finding ${esc(item.severity || "info")}"><b>${esc(item.severity || "info")}</b><span>${esc(item.message || item.check_id || "Quality finding")}</span></div>`).join("")}</div>` : `<div class="detail-note success">未记录质量门禁问题。</div>`;
+      showModal(`<div class="result-detail"><h2>评测结果详情</h2><p class="muted mono">${esc(result.evaluation_id)}</p><div class="detail-summary"><div class="detail-stat"><span class="muted">评测结论</span><b>${badge(result.outcome)}</b></div><div class="detail-stat"><span class="muted">综合得分</span><b>${Number(result.score || 0).toFixed(1)}</b></div><div class="detail-stat"><span class="muted">目标测试</span><b>${result.fail_to_pass_passed} / ${result.fail_to_pass_total}</b></div><div class="detail-stat"><span class="muted">回归测试</span><b>${result.pass_to_pass_passed} / ${result.pass_to_pass_total}</b></div></div><div class="detail-tabs">${tabButton("overview", "概览", true)}${tabButton("tests", "测试结果")}${tabButton("quality", "质量与评分")}${tabButton("logs", "执行日志")}${tabButton("raw", "原始数据")}</div><section id="result-detail-overview" class="detail-pane active"><div class="detail-meta">${keyValue("测试实例", esc(result.instance_id), "mono")}${keyValue("预测编号", esc(result.prediction_id), "mono")}${keyValue("评测后端", esc(result.harness_version || "-"))}${keyValue("补丁 / 构建", `${result.patch_applied ? "已应用" : "未应用"} / ${result.build_passed ? "通过" : "未通过"}`)}</div><h3>执行状态</h3><div class="detail-note ${result.build_passed ? "success" : "danger"}">${result.build_passed ? "构建已通过，当前结果由目标测试或回归测试决定。" : "构建未通过，请在“执行日志”中查看构建输出。"}</div><h3>评分概览</h3>${scoreBar(`功能正确性 · ${Number(weights.functional || 0) * 100}%`, result.functional_score, `目标测试 ${Math.round(f2p * 100)}%，回归测试 ${Math.round(p2p * 100)}%`)}${scoreBar(`代码质量 · ${Number(weights.code_quality || 0) * 100}%`, result.code_quality_score, result.build_passed ? "补丁可构建，结合质量检查评分" : "构建未通过，代码质量得分受限")}${scoreBar(`文档质量 · ${Number(weights.documentation || 0) * 100}%`, result.documentation_score, `${metrics.document_count || 0} 份文档，需求追踪 ${metrics.covered_trace_links || 0}/${metrics.trace_link_count || 0}`)}</section><section id="result-detail-tests" class="detail-pane"><h3>FAIL_TO_PASS · 修复目标</h3>${renderCases(result, "fail_to_pass", "没有目标测试明细。")}<h3>PASS_TO_PASS · 回归保护</h3>${renderCases(result, "pass_to_pass", "没有回归测试明细。")}</section><section id="result-detail-quality" class="detail-pane"><h3>质量门禁</h3><div class="detail-meta">${keyValue("质量门禁", esc(result.quality_gate || "not_applicable"))}${keyValue("文档数量", esc(metrics.document_count || 0))}${keyValue("追踪覆盖", `${metrics.covered_trace_links || 0} / ${metrics.trace_link_count || 0}`)}${keyValue("代码质量检查", esc(result.code_quality_metrics?.status || "-"))}</div>${findingRows}<h3>评分计算</h3><div class="detail-note">${Number(result.functional_score || 0).toFixed(1)} × ${weights.functional} + ${Number(result.code_quality_score || 0).toFixed(1)} × ${weights.code_quality} + ${Number(result.documentation_score || 0).toFixed(1)} × ${weights.documentation} = <b>${Number(result.score || 0).toFixed(1)}</b></div></section><section id="result-detail-logs" class="detail-pane">${renderLogGroups(result)}</section><section id="result-detail-raw" class="detail-pane"><p class="muted">用于排障的完整原始响应；默认折叠，避免影响阅读。</p><details class="log-card"><summary>展开原始 JSON</summary><pre>${esc(JSON.stringify(result, null, 2))}</pre></details></section></div>`);
+    } catch (error) { alert(`加载评测详情失败：${error.message}`); }
+  };
   function activateView(name) { const button = document.querySelector(`[data-view="${name}"]`); if (button) button.click(); }
   window.activateView = activateView;
   function choices() { return state.instances.map(item => `<label><input type="checkbox" name="comparisonInstance" value="${esc(item.instance_id)}" checked> ${esc(item.instance_id)}</label>`).join("<br>"); }

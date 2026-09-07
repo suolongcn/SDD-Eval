@@ -2,7 +2,7 @@ from pathlib import Path
 import subprocess
 
 from sdd_eval.docker_backend import DockerEvaluationBackend
-from sdd_eval.harness import CommandResult
+from sdd_eval.harness import CommandResult, LocalEvaluationBackend
 from sdd_eval.models import BenchmarkInstance, ContainerLimits, DockerSpec, EnvironmentSpec, EvaluationOracle, Prediction
 
 
@@ -49,6 +49,24 @@ def test_wsl_docker_converts_windows_bind_mount(tmp_path):
     command = backend.create_command(docker_instance(), Path("D:/Code/work"), "sdd-eval-test")
 
     assert command[command.index("--mount") + 1] == "type=bind,src=/mnt/d/Code/work,dst=/workspace"
+
+
+def test_wsl_docker_keeps_container_cache_paths(monkeypatch, tmp_path):
+    captured = []
+
+    def run(command, **kwargs):
+        captured.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("sdd_eval.harness.subprocess.run", run)
+    result = LocalEvaluationBackend()._run(
+        ["wsl.exe", "docker", "exec", "container", "mvn", "-Dmaven.repo.local=/sdd-cache/m2"],
+        tmp_path,
+        30,
+    )
+
+    assert result.passed
+    assert "-Dmaven.repo.local=/sdd-cache/m2" in captured[0]
 
 
 def test_dependency_cache_uses_hashed_managed_volume(tmp_path):
