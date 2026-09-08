@@ -123,6 +123,26 @@ class EvaluationOracle(BaseModel):
     reference_commit: str | None = None
     expected_results: dict[str, Any] = Field(default_factory=dict)
     quality_review: dict[str, Any] = Field(default_factory=dict)
+    oracle_kind: Literal["legacy", "source_marker", "behavioral_contract"] = "legacy"
+    cucumber: "CucumberContractSpec | None" = None
+    test_adapter: "TestAdapterSpec | None" = None
+
+
+class CucumberContractSpec(BaseModel):
+    """Private Cucumber report contract; selectors are normally tag expressions."""
+    report_path: str
+    target_tags: list[str] = Field(default_factory=lambda: ["@target"])
+    regression_tags: list[str] = Field(default_factory=lambda: ["@regression"])
+    minimum_target_scenarios: int = Field(default=1, ge=1)
+    minimum_regression_scenarios: int = Field(default=1, ge=1)
+
+
+class TestAdapterSpec(BaseModel):
+    """An LLM-produced structural binding patch, constrained by frozen assets."""
+    patch: str
+    allowed_paths: list[str] = Field(min_length=1)
+    frozen_contract_paths: list[str] = Field(min_length=1)
+    frozen_contract_digest: str = Field(min_length=64, max_length=64)
 
 
 class ArtifactBundle(BaseModel):
@@ -295,6 +315,8 @@ class BenchmarkJob(BenchmarkJobCreate):
     worker_id: str | None = None
     result_id: str | None = None
     error: str | None = None
+    rate_limited: bool = False
+    retry_reason: str | None = None
     cancellation_requested: bool = False
     available_at: datetime = Field(default_factory=now)
     lease_expires_at: datetime | None = None

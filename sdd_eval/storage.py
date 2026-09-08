@@ -326,7 +326,8 @@ class Store:
             )
             return job
 
-    def finish_job(self, job_id: str, worker_id: str, result_id: str | None = None, error: str | None = None, retry_delay_seconds: int = 0):
+    def finish_job(self, job_id: str, worker_id: str, result_id: str | None = None, error: str | None = None,
+                   retry_delay_seconds: int = 0, rate_limited: bool = False, retry_reason: str | None = None):
         with self.conn() as connection:
             connection.execute("begin immediate")
             row = connection.execute("select data from benchmark_jobs where id=?", (job_id,)).fetchone()
@@ -338,7 +339,8 @@ class Store:
             elif error and job.attempt < job.max_attempts: job.status = "queued"; job.available_at = current + timedelta(seconds=retry_delay_seconds)
             elif error: job.status = "failed"
             else: job.status = "completed"; job.result_id = result_id
-            job.error = error; job.worker_id = None; job.lease_expires_at = None; job.heartbeat_at = None
+            job.error = error; job.rate_limited = rate_limited; job.retry_reason = retry_reason
+            job.worker_id = None; job.lease_expires_at = None; job.heartbeat_at = None
             if job.status in {"completed", "failed", "cancelled"}: job.finished_at = current
             self._write_job(connection, job)
             if attempt:
@@ -374,7 +376,7 @@ class Store:
                 if job.kind != "generate_and_evaluate": return None
                 job.model = replacement_model
             job.max_attempts = max(job.max_attempts, job.attempt + 1); job.status = "queued"; job.available_at = now()
-            job.cancellation_requested = False; job.error = None; job.finished_at = None
+            job.cancellation_requested = False; job.error = None; job.rate_limited = False; job.retry_reason = None; job.finished_at = None
             self._write_job(connection, job); return job
 
     def list_job_attempts(self, job_id: str):

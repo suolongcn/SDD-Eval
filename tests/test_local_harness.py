@@ -3,7 +3,7 @@ import subprocess
 import sys
 
 from sdd_eval.harness import CommandResult, LocalEvaluationBackend
-from sdd_eval.models import BenchmarkInstance, EnvironmentSpec, EvaluationOracle, Prediction
+from sdd_eval.models import BenchmarkInstance, CucumberContractSpec, EnvironmentSpec, EvaluationOracle, Prediction
 
 
 def git(root: Path, *args: str) -> str:
@@ -171,6 +171,32 @@ def test_target_failure_and_regression_are_distinct(tmp_path):
     assert regression.fail_to_pass_passed == 1
     assert regression.pass_to_pass_passed == 0
     assert regression.score == 50
+
+
+def test_cucumber_contract_scores_behavior_not_implementation_names(tmp_path):
+    instance, _, gold_patch, _, _ = benchmark_fixture(tmp_path)
+    repo = Path(instance.repo)
+    runner = """import json, sys
+import app
+tag = sys.argv[1]
+passed = app.value() == 2 if tag == '@target' else True
+payload = [{'name': 'Value API', 'elements': [{'name': 'value endpoint', 'tags': [{'name': tag}], 'steps': [{'name': 'response', 'result': {'status': 'passed' if passed else 'failed'}}]}]}]
+open('cucumber.json', 'w', encoding='utf-8').write(json.dumps(payload))
+raise SystemExit(0 if passed else 1)
+"""
+    test_patch = patch_for(repo, {"contract_runner.py": runner})
+    instance = instance.model_copy(update={
+        "environment": instance.environment.model_copy(update={"test_command": [sys.executable, "contract_runner.py", "{tests}"]}),
+    })
+    oracle = EvaluationOracle(instance_id=instance.instance_id, gold_patch=gold_patch, test_patch=test_patch,
+        fail_to_pass=["@target"], pass_to_pass=["@regression"], oracle_kind="behavioral_contract",
+        cucumber=CucumberContractSpec(report_path="cucumber.json"))
+    backend = LocalEvaluationBackend()
+    validation = backend.validate_instance(instance, oracle)
+    result = backend.evaluate(instance, oracle, prediction(instance.instance_id, gold_patch, "cucumber"))
+    assert validation.valid
+    assert result.resolved
+    assert result.test_cases["fail_to_pass"][0]["scenarios"][0]["framework"] == "cucumber"
 
 
 def test_composite_score_weights_functional_code_and_documentation(tmp_path):

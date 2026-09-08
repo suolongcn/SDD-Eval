@@ -25,6 +25,7 @@ from .models import (
     InstanceValidationResult,
     Prediction,
 )
+from .contracts import contract_digest, cucumber_scenarios, validate_adapter_patch
 from .quality import (QualityFinding, assess_quality, check_alibaba_java,
                       command_quality_metrics, quality_command_policy)
 
@@ -225,7 +226,8 @@ class LocalEvaluationBackend:
                 return
         else:
             result.build_passed = True
-        for group_name, selectors in (("fail_to_pass", oracle.fail_to_pass), ("pass_to_pass", oracle.pass_to_pass)):
+        groups = (("fail_to_pass", oracle.fail_to_pass), ("pass_to_pass", oracle.pass_to_pass))
+        for group_name, selectors in groups:
             passed = 0
             outputs = []
             cases = []
@@ -233,13 +235,29 @@ class LocalEvaluationBackend:
                 command = self._expand_test_command(instance.environment.test_command, [selector])
                 test = self._run(command, cwd, instance.environment.test_timeout_seconds)
                 outputs.append(f"===== {selector} (exit {test.returncode}) =====\n{test.output}")
-                cases.append({
+                case = {
                     "selector": selector,
                     "passed": test.passed,
                     "returncode": test.returncode,
                     "output": test.output,
-                })
-                passed += int(test.passed)
+                }
+                if oracle.cucumber:
+                    report = cwd / oracle.cucumber.report_path
+                    tags = oracle.cucumber.target_tags if group_name == "fail_to_pass" else oracle.cucumber.regression_tags
+                    minimum = oracle.cucumber.minimum_target_scenarios if group_name == "fail_to_pass" else oracle.cucumber.minimum_regression_scenarios
+                    try:
+                        parsed = cucumber_scenarios(report, tags)
+                        if len(parsed) < minimum:
+                            raise ValueError(f"expected at least {minimum} scenarios tagged {', '.join(tags)}; found {len(parsed)}")
+                        case["scenarios"] = parsed
+                        case["passed"] = test.passed and all(item["passed"] for item in parsed)
+                        case["returncode"] = 0 if case["passed"] else (test.returncode or 1)
+                    except ValueError as error:
+                        case["passed"] = False
+                        case["returncode"] = test.returncode or 1
+                        case["output"] = f"{test.output}\nCucumber contract error: {error}"
+                cases.append(case)
+                passed += int(bool(case["passed"]))
             result.logs[group_name] = "\n".join(outputs)
             result.test_cases[group_name] = cases
             if group_name == "fail_to_pass":
@@ -247,6 +265,29 @@ class LocalEvaluationBackend:
             else:
                 result.pass_to_pass_passed = passed
         self._run_configured_quality(root, instance, oracle, result)
+
+    def _apply_test_assets(self, root: Path, oracle: EvaluationOracle, result: CheckoutResult) -> bool:
+        """Apply private tests plus an optional LLM binding adapter safely."""
+        test_patch = self._apply_patch(root, oracle.test_patch, "test patch")
+        result.logs["test_patch"] = test_patch.output
+        if not test_patch.passed:
+            result.error = "test patch could not be applied"; result.error_kind = "harness_error"; return False
+        adapter = oracle.test_adapter
+        if not adapter:
+            return True
+        try:
+            if contract_digest(root, adapter.frozen_contract_paths) != adapter.frozen_contract_digest:
+                raise ValueError("frozen contract digest does not match the private test assets")
+            valid, reason = validate_adapter_patch(adapter.patch, adapter.allowed_paths)
+            if not valid:
+                raise ValueError(reason)
+        except ValueError as error:
+            result.error = f"test adapter rejected: {error}"; result.error_kind = "harness_error"; return False
+        applied = self._apply_patch(root, adapter.patch, "test adapter patch")
+        result.logs["test_adapter"] = applied.output
+        if not applied.passed:
+            result.error = "test adapter patch could not be applied"; result.error_kind = "harness_error"; return False
+        return True
 
     @staticmethod
     def _run_code_quality(root: Path, oracle: EvaluationOracle, patch: str, result: CheckoutResult) -> None:
@@ -360,11 +401,7 @@ class LocalEvaluationBackend:
             result.error_kind = "invalid_patch"
             return result
         self._run_code_quality(root, oracle, model_patch, result)
-        test_patch = self._apply_patch(root, oracle.test_patch, "test patch")
-        result.logs["test_patch"] = test_patch.output
-        if not test_patch.passed:
-            result.error = "test patch could not be applied"
-            result.error_kind = "harness_error"
+        if not self._apply_test_assets(root, oracle, result):
             return result
         self._run_build_and_tests(root, instance, oracle, result)
         return result
@@ -549,9 +586,6 @@ class LocalEvaluationBackend:
                 if not self._run_setup(root, instance, result): return result
             except ValueError as error:
                 result.error = str(error); result.error_kind = "environment_error"; return result
-            test_patch = self._apply_patch(root, oracle.test_patch, "test patch")
-            result.logs["test_patch"] = test_patch.output
-            if not test_patch.passed:
-                result.error = "test patch could not be applied"; result.error_kind = "harness_error"; return result
+            if not self._apply_test_assets(root, oracle, result): return result
             self._run_build_and_tests(root, instance, oracle, result)
         return result

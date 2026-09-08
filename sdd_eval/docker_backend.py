@@ -13,6 +13,7 @@ import uuid
 
 from .harness import CheckoutResult, CommandResult, LocalEvaluationBackend
 from .models import BenchmarkInstance, EvaluationOracle, Prediction
+from .contracts import cucumber_scenarios
 from .quality import command_quality_metrics, quality_command_policy
 
 
@@ -184,10 +185,7 @@ class DockerEvaluationBackend(LocalEvaluationBackend):
             if result.forbidden_changes:
                 result.error = "model patch modifies forbidden paths"; result.error_kind = "invalid_patch"; return result
             self._run_code_quality(root, oracle, model_patch, result)
-        test_patch = self._apply_patch(root, oracle.test_patch, "test patch")
-        result.logs["test_patch"] = test_patch.output
-        if not test_patch.passed:
-            result.error = "test patch could not be applied"; result.error_kind = "harness_error"; return result
+        if not self._apply_test_assets(root, oracle, result): return result
         if not self.available():
             result.error = "Docker CLI or daemon is unavailable"; result.error_kind = "environment_error"; return result
         if not instance.docker.image:
@@ -229,13 +227,28 @@ class DockerEvaluationBackend(LocalEvaluationBackend):
                     command = self._expand_test_command(instance.environment.test_command, [selector])
                     test = self._exec(container, container_cwd, command, instance.environment.test_timeout_seconds)
                     outputs.append(f"===== {selector} (exit {test.returncode}) =====\n{test.output}")
-                    cases.append({
+                    case = {
                         "selector": selector,
                         "passed": test.passed,
                         "returncode": test.returncode,
                         "output": test.output,
-                    })
-                    passed += int(test.passed)
+                    }
+                    if oracle.cucumber:
+                        report = root / instance.environment.working_directory / oracle.cucumber.report_path
+                        tags = oracle.cucumber.target_tags if group_name == "fail_to_pass" else oracle.cucumber.regression_tags
+                        minimum = oracle.cucumber.minimum_target_scenarios if group_name == "fail_to_pass" else oracle.cucumber.minimum_regression_scenarios
+                        try:
+                            parsed = cucumber_scenarios(report, tags)
+                            if len(parsed) < minimum:
+                                raise ValueError(f"expected at least {minimum} scenarios tagged {', '.join(tags)}; found {len(parsed)}")
+                            case["scenarios"] = parsed
+                            case["passed"] = test.passed and all(item["passed"] for item in parsed)
+                            case["returncode"] = 0 if case["passed"] else (test.returncode or 1)
+                        except ValueError as error:
+                            case["passed"] = False; case["returncode"] = test.returncode or 1
+                            case["output"] = f"{test.output}\nCucumber contract error: {error}"
+                    cases.append(case)
+                    passed += int(bool(case["passed"]))
                 result.logs[group_name] = "\n".join(outputs)
                 result.test_cases[group_name] = cases
                 if group_name == "fail_to_pass": result.fail_to_pass_passed = passed

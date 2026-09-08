@@ -9,7 +9,7 @@ from sdd_eval.models import (
     GenerationJobCreate, InstanceValidationResult, Prediction, now,
 )
 from sdd_eval.storage import Store
-from sdd_eval.worker import BenchmarkWorker
+from sdd_eval.worker import BenchmarkWorker, RATE_LIMIT_RETRY_SECONDS, is_rate_limit_error
 
 
 def prepared_store(tmp_path):
@@ -131,6 +131,24 @@ def test_worker_generates_prediction_then_evaluates_it(tmp_path):
     assert completed.status == "completed"
     assert (prediction.client, prediction.model_name_or_path, prediction.workflow) == ("codex", "gpt-5.6-terra", "openspec")
     assert result.score == 100
+
+
+class RateLimitedGenerator:
+    def generate(self, *args, **kwargs):
+        raise RuntimeError("HTTP 429: too many requests")
+
+
+def test_rate_limited_generation_waits_for_the_five_hour_window(tmp_path):
+    store, instance, _ = prepared_store(tmp_path)
+    job = BenchmarkJob(job_id="job-rate-limit", kind="generate_and_evaluate", instance_id=instance.instance_id,
+                       backend="local", max_attempts=2, client="codex", model="gpt-5.6-terra", workflow="openspec")
+    store.put_job(job)
+    BenchmarkWorker(store, worker_id="worker", generator_factory=RateLimitedGenerator).run_once()
+    queued = store.get_job(job.job_id)
+    assert queued.status == "queued" and queued.rate_limited
+    assert queued.retry_reason == "model_rate_limit_5h_window"
+    assert 5 * 60 * 60 - 2 <= (queued.available_at - now()).total_seconds() <= RATE_LIMIT_RETRY_SECONDS
+    assert is_rate_limit_error("quota exceeded") and not is_rate_limit_error("model output was invalid")
 
 
 def test_generation_job_accepts_provider_qualified_opencode_model():

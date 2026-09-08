@@ -3,7 +3,7 @@ import subprocess
 
 from sdd_eval.docker_backend import DockerEvaluationBackend
 from sdd_eval.harness import CommandResult, LocalEvaluationBackend
-from sdd_eval.models import BenchmarkInstance, ContainerLimits, DockerSpec, EnvironmentSpec, EvaluationOracle, Prediction
+from sdd_eval.models import BenchmarkInstance, ContainerLimits, CucumberContractSpec, DockerSpec, EnvironmentSpec, EvaluationOracle, Prediction
 
 
 def docker_instance(repo: str = ".") -> BenchmarkInstance:
@@ -190,3 +190,23 @@ def test_container_is_removed_when_start_fails(tmp_path, monkeypatch):
 
     assert result.error_kind == "environment_error"
     assert calls[-1][0:2] == ["rm", "--force"]
+
+
+def test_docker_cucumber_contract_parses_tagged_scenarios(tmp_path, monkeypatch):
+    backend = DockerEvaluationBackend()
+    instance = docker_instance()
+    oracle = EvaluationOracle(instance_id=instance.instance_id, test_patch="patch", fail_to_pass=["@target"],
+        pass_to_pass=["@regression"], cucumber=CucumberContractSpec(report_path="cucumber.json"))
+    checkout = tmp_path / "checkout"; checkout.mkdir()
+    (checkout / "cucumber.json").write_text('[{"elements":[{"name":"target","tags":[{"name":"@target"}],"steps":[{"result":{"status":"passed"}}]},{"name":"regression","tags":[{"name":"@regression"}],"steps":[{"result":{"status":"passed"}}]}]}]', encoding="utf-8")
+    monkeypatch.setattr(backend, "_prepare_checkout", lambda *args: (checkout, "ok"))
+    monkeypatch.setattr(backend, "_apply_patch", lambda *args: CommandResult(True, 0, "ok"))
+    monkeypatch.setattr(backend, "_changed_paths", lambda root: [])
+    monkeypatch.setattr(backend, "available", lambda: True)
+    monkeypatch.setattr(backend, "_ensure_image", lambda instance: CommandResult(True, 0, "ok"))
+    monkeypatch.setattr(backend, "create_command", lambda *args: ["create"])
+    monkeypatch.setattr(backend, "_docker", lambda args, timeout=600: CommandResult(True, 0, "ok"))
+    monkeypatch.setattr(backend, "_exec", lambda *args: CommandResult(True, 0, "ok"))
+    result = backend._run_in_container(instance, oracle, "model patch", tmp_path / "run")
+    assert result.fail_to_pass_passed == result.pass_to_pass_passed == 1
+    assert result.test_cases["pass_to_pass"][0]["scenarios"][0]["selector"] == "regression"

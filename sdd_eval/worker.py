@@ -12,6 +12,19 @@ from .models import Prediction
 from .storage import Store
 
 
+RATE_LIMIT_RETRY_SECONDS = 5 * 60 * 60
+RATE_LIMIT_MARKERS = (
+    "rate limit", "rate_limit", "ratelimit", "too many requests", "http 429",
+    "status code 429", "quota exceeded", "resource exhausted",
+)
+
+
+def is_rate_limit_error(error: BaseException | str) -> bool:
+    """Recognize provider throttling without treating ordinary agent errors as retryable."""
+    text = str(error).lower()
+    return any(marker in text for marker in RATE_LIMIT_MARKERS)
+
+
 def create_backend(name: str):
     if name == "local":
         return LocalEvaluationBackend()
@@ -103,7 +116,12 @@ class BenchmarkWorker:
                 result_id = result.evaluation_id
             self.store.finish_job(job.job_id, self.worker_id, result_id=result_id)
         except Exception as error:
-            self.store.finish_job(job.job_id, self.worker_id, error=str(error), retry_delay_seconds=min(60, 2 ** job.attempt))
+            throttled = is_rate_limit_error(error)
+            delay = RATE_LIMIT_RETRY_SECONDS if throttled else min(60, 2 ** job.attempt)
+            self.store.finish_job(
+                job.job_id, self.worker_id, error=str(error), retry_delay_seconds=delay,
+                rate_limited=throttled, retry_reason="model_rate_limit_5h_window" if throttled else None,
+            )
         finally:
             stopped.set()
             heartbeat.join(timeout=1)

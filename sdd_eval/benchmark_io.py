@@ -132,6 +132,9 @@ def from_swebench_record(
         reference_commit=str(oracle_data.get("reference_commit") or record.get("reference_commit") or "") or None,
         expected_results=oracle_data.get("expected_results") or record.get("expected_results") or {},
         quality_review=oracle_data.get("quality_review") or record.get("quality_review") or {},
+        oracle_kind=oracle_data.get("oracle_kind", record.get("oracle_kind", "legacy")),
+        cucumber=oracle_data.get("cucumber") or record.get("cucumber"),
+        test_adapter=oracle_data.get("test_adapter") or record.get("test_adapter"),
     )
     return instance, oracle
 
@@ -185,6 +188,9 @@ def _swebench_record(
             "reference_commit": oracle.reference_commit,
             "expected_results": oracle.expected_results,
             "quality_review": oracle.quality_review,
+            "oracle_kind": oracle.oracle_kind,
+            "cucumber": oracle.cucumber.model_dump(mode="json") if oracle.cucumber else None,
+            "test_adapter": oracle.test_adapter.model_dump(mode="json") if oracle.test_adapter else None,
         })
     return record
 

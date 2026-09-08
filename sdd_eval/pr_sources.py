@@ -223,5 +223,6 @@ class PullRequestSourceService:
         )
         oracle = EvaluationOracle(instance_id=instance_id, gold_patch=patch, test_patch=test_patch,
             fail_to_pass=f2p, pass_to_pass=p2p, reference_commit=pr.head_commit,
+            oracle_kind="source_marker",
             expected_results={"source": "merged-pr", "forge": request.forge})
         return instance, oracle

@@ -9,7 +9,7 @@ Homepage = "https://github.com/suolongcn/SDD-Eval"
 Repository = "https://github.com/suolongcn/SDD-Eval"
 Issues = "https://github.com/suolongcn/SDD-Eval/issues"
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "build>=1.2"]
+dev = ["pytest>=8.0", "coverage>=7.0", "build>=1.2"]
 [project.scripts]
 sdd-eval = "sdd_eval.cli:app"
 
